@@ -266,5 +266,249 @@ checkZoom();
 setInterval(checkZoom, CHECK_INTERVAL_MINUTES * 60 * 1000);
   </code></pre>
 
+
+
+
+
+
+    <p><strong>Final Debug.js</strong></p>
+
+  <pre><code>
+require('dotenv').config();
+const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
+const { google } = require('googleapis');
+const querystring = require('querystring');
+const nodemailer = require('nodemailer');
+
+// --- CONFIGURATION ---
+const CHECK_INTERVAL_MINUTES = 15;
+const TOKEN_PATH = path.join(__dirname, 'zoom_token.json');
+const LOG_PATH = path.join(__dirname, 'completed_log.json');
+
+// Global Cache for ClickUp Column IDs
+let FIELD_MAP = { internal: null, member: null };
+
+// --- 1. EMAIL SENDER ---
+async function sendEmailNotification(status, videoName, brand, linkOrReason) {
+    try {
+        if (!process.env.EMAIL_USER) return;
+
+        const transporter = nodemailer.createTransport({
+            service: 'gmail',
+            auth: {
+                type: 'OAuth2',
+                user: process.env.EMAIL_USER,
+                clientId: process.env.GOOGLE_CLIENT_ID,
+                clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+                refreshToken: process.env.GOOGLE_REFRESH_TOKEN
+            }
+        });
+
+        const subject = status === 'SUCCESS' 
+            ? `✅ Upload Success: ${videoName}` 
+            : `❌ Upload Failed: ${videoName}`;
+
+        const text = status === 'SUCCESS'
+            ? `Video: ${videoName}\nBrand: ${brand}\n\nSuccessfully uploaded to Drive!\nView here: ${linkOrReason}`
+            : `Video: ${videoName}\nBrand: ${brand}\n\nFailed to upload.\nReason: ${linkOrReason}`;
+
+        await transporter.sendMail({
+            from: process.env.EMAIL_USER,
+            to: process.env.EMAIL_USER,
+            subject: subject,
+            text: text
+        });
+
+        console.log(`   📧 Email notification sent.`);
+    } catch (error) {
+        console.error("   ❌ Failed to send email:", error.message);
+    }
+}
+
+// --- 2. ZOOM AUTH ---
+async function getZoomAccessToken() {
+    if (!fs.existsSync(TOKEN_PATH)) throw new Error("❌ No Token Found!");
+    let tokenData = JSON.parse(fs.readFileSync(TOKEN_PATH));
+    if (Date.now() >= tokenData.expires_at) {
+        console.log('🔄 Refreshing Zoom Token...');
+        const credentials = Buffer.from(`${process.env.ZOOM_CLIENT_ID}:${process.env.ZOOM_CLIENT_SECRET}`).toString('base64');
+        const res = await axios.post('https://zoom.us/oauth/token', 
+            querystring.stringify({ grant_type: 'refresh_token', refresh_token: tokenData.refresh_token }),
+            { headers: { 'Authorization': `Basic ${credentials}`, 'Content-Type': 'application/x-www-form-urlencoded' } }
+        );
+        tokenData = { access_token: res.data.access_token, refresh_token: res.data.refresh_token, expires_at: Date.now() + (res.data.expires_in * 1000) - 5000 };
+        fs.writeFileSync(TOKEN_PATH, JSON.stringify(tokenData));
+    }
+    return tokenData.access_token;
+}
+
+// --- 3. CLICKUP INTELLIGENCE ---
+async function getClickUpColumnIDs() {
+    if (FIELD_MAP.internal && FIELD_MAP.member) return;
+    if (!process.env.CLICKUP_LIST_ID || !process.env.CLICKUP_API_KEY) return;
+
+    // console.log("🔍 Syncing ClickUp Columns...");
+    const url = `https://api.clickup.com/api/v2/list/${process.env.CLICKUP_LIST_ID}/field`;
+    const res = await axios.get(url, { headers: { 'Authorization': process.env.CLICKUP_API_KEY } });
+    
+    const fields = res.data.fields;
+    const internalField = fields.find(f => f.name === process.env.CLICKUP_INTERNAL_COL_NAME);
+    const memberField = fields.find(f => f.name === process.env.CLICKUP_MEMBER_COL_NAME);
+
+    if (internalField) FIELD_MAP.internal = internalField.id;
+    if (memberField) FIELD_MAP.member = memberField.id;
+}
+
+async function getFolderLinks(brandName) {
+    // 🛠️ DEBUG TEST MODE: SYOTI HARDCODE
+    if (brandName.toUpperCase().includes('SYOTI')) {
+        console.log("   🧪 TEST MODE: Redirecting 'Syoti' to Debug Folders...");
+        return {
+            // New folder IDs provided by user
+            internalFolderId: "19hksGePp4XPpiTpYES-ogcj8Fx0fFszX", 
+            memberFolderId: "1FoSkvhk-j8Mb0mrOKf8MA0xhU81jjRsr"
+        };
+    }
+
+    try {
+        const url = `https://api.clickup.com/api/v2/list/${process.env.CLICKUP_LIST_ID}/task?include_closed=true`;
+        const res = await axios.get(url, { headers: { 'Authorization': process.env.CLICKUP_API_KEY } });
+
+        const task = res.data.tasks.find(t => t.name.trim().toLowerCase() === brandName.trim().toLowerCase());
+        if (!task) return null;
+
+        const internalVal = task.custom_fields.find(f => f.id === FIELD_MAP.internal)?.value;
+        const memberVal = task.custom_fields.find(f => f.id === FIELD_MAP.member)?.value;
+
+        const extractId = (link) => {
+            if (!link) return null;
+            if (link.includes('id=')) return link.split('id=')[1];
+            const parts = link.split('/');
+            return parts[parts.length - 1] || parts[parts.length - 2];
+        };
+
+        return { internalFolderId: extractId(internalVal), memberFolderId: extractId(memberVal) };
+    } catch (error) {
+        return null;
+    }
+}
+
+// --- 4. GOOGLE UPLOAD ---
+async function uploadToDrive(filePath, fileName, folderId) {
+    const oauth2Client = new google.auth.OAuth2(
+        process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, "http://localhost"
+    );
+    oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
+    const drive = google.drive({ version: 'v3', auth: oauth2Client });
+
+    const fileMetadata = { name: fileName, parents: [folderId] };
+    const media = { mimeType: 'video/mp4', body: fs.createReadStream(filePath) };
+
+    const res = await drive.files.create({ resource: fileMetadata, media: media, fields: 'id, webViewLink' });
+    return res.data;
+}
+
+// --- 5. THE WATCHMAN LOOP (SINGLE USER / DEBUG MODE) ---
+async function checkZoom() {
+    try {
+        console.log(`\n🕒 DEBUG Scan: ${new Date().toLocaleTimeString()}`);
+        await getClickUpColumnIDs();
+        const token = await getZoomAccessToken();
+
+        let completed = [];
+        if (fs.existsSync(LOG_PATH)) completed = JSON.parse(fs.readFileSync(LOG_PATH));
+
+        // 🟢 DEBUG: Check ONLY Today
+        const today = new Date().toISOString().split('T')[0];
+        console.log(`   🔎 Scanning Personal Recordings for TODAY: ${today}`);
+
+        // 🟢 DEBUG: Single User Endpoint (/users/me/recordings)
+        const url = `https://api.zoom.us/v2/users/me/recordings?from=${today}&to=${today}`;
+        
+        const res = await axios.get(url, { headers: { 'Authorization': `Bearer ${token}` } });
+
+        if (!res.data.meetings || res.data.meetings.length === 0) {
+            console.log("   (No recordings found for today)");
+            return;
+        }
+
+        for (const meeting of res.data.meetings) {
+            if (completed.includes(meeting.uuid)) continue;
+
+            const nameParts = meeting.topic.split(' x ');
+            if (nameParts.length < 2) {
+                console.log(`   ⚠️ Ignoring "${meeting.topic}" (Format mismatch)`);
+                continue; 
+            }
+
+            let brand = nameParts[1].split('-')[0].trim();
+            console.log(`   🚀 Found Target: "${meeting.topic}" (Brand: ${brand})`);
+
+            const links = await getFolderLinks(brand);
+            
+            if (!links || !links.internalFolderId) {
+                console.log(`   ❌ Brand "${brand}" missing details.`);
+                await sendEmailNotification('FAIL', meeting.topic, brand, "Brand not found in ClickUp.");
+                continue;
+            }
+
+            console.log(`   ✅ Destination Found!`);
+
+            for (const file of meeting.recording_files) {
+                // Only process MP4 and M4A
+                if (file.file_type !== 'MP4' && file.file_type !== 'M4A') continue;
+
+                const downloadUrl = `${file.download_url}?access_token=${token}`;
+                const fileExt = file.file_type === 'MP4' ? '.mp4' : '.m4a';
+                const tempName = `${meeting.topic.replace(/[^a-zA-Z0-9]/g, '_')}${fileExt}`;
+                const tempPath = path.join(__dirname, tempName);
+
+                try {
+                    console.log(`   ⬇️ Downloading ${file.file_type}...`);
+                    const writer = fs.createWriteStream(tempPath);
+                    const streamRes = await axios({ url: downloadUrl, method: 'GET', responseType: 'stream' });
+                    streamRes.data.pipe(writer);
+
+                    await new Promise((resolve, reject) => {
+                        writer.on('finish', resolve);
+                        writer.on('error', reject);
+                    });
+
+                    let targetFolder = links.memberFolderId;
+                    if (file.file_type === 'MP4') targetFolder = links.internalFolderId;
+
+                    if (targetFolder) {
+                        console.log(`   📤 Uploading to Drive Folder: ${targetFolder}`);
+                        const uploadData = await uploadToDrive(tempPath, tempName, targetFolder);
+                        
+                        if (file.file_type === 'MP4') {
+                             await sendEmailNotification('SUCCESS', meeting.topic, brand, `https://drive.google.com/file/d/${uploadData.id}/view`);
+                        }
+                        console.log(`   🎉 Upload Complete!`);
+                    }
+
+                } catch (err) {
+                    console.error(`   ❌ Error: ${err.message}`);
+                    await sendEmailNotification('FAIL', meeting.topic, brand, err.message);
+                } finally {
+                    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); 
+                }
+            }
+
+            completed.push(meeting.uuid);
+            fs.writeFileSync(LOG_PATH, JSON.stringify(completed, null, 2));
+            console.log(`   🎉 Finished processing "${meeting.topic}".`);
+        }
+
+    } catch (error) {
+        console.error("❌ Debug Error:", error.message);
+    }
+}
+
+checkZoom();
+setInterval(checkZoom, CHECK_INTERVAL_MINUTES * 60 * 1000);
+  </code></pre>
 </body>
 </html>
