@@ -30,34 +30,16 @@ const TOKEN_PATH = path.join(__dirname, 'zoom_token.json');
 const LOG_PATH = path.join(__dirname, 'completed_log.json');
 
 async function getZoomAccessToken() {
-    if (!fs.existsSync(TOKEN_PATH)) throw new Error("❌ Login first using your install route!");
+    if (!fs.existsSync(TOKEN_PATH)) throw new Error("❌ Login first!");
     let tokenData = JSON.parse(fs.readFileSync(TOKEN_PATH));
     if (Date.now() >= tokenData.expires_at) {
         console.log('🔄 Refreshing Token...');
-        const credentials = Buffer.from(
-          `${process.env.ZOOM_CLIENT_ID}:${process.env.ZOOM_CLIENT_SECRET}`
-        ).toString('base64');
-
-        const res = await axios.post(
-          'https://zoom.us/oauth/token',
-          querystring.stringify({
-            grant_type: 'refresh_token',
-            refresh_token: tokenData.refresh_token
-          }),
-          {
-            headers: {
-              'Authorization': `Basic ${credentials}`,
-              'Content-Type': 'application/x-www-form-urlencoded'
-            }
-          }
+        const credentials = Buffer.from(`${process.env.ZOOM_CLIENT_ID}:${process.env.ZOOM_CLIENT_SECRET}`).toString('base64');
+        const res = await axios.post('https://zoom.us/oauth/token', 
+            querystring.stringify({ grant_type: 'refresh_token', refresh_token: tokenData.refresh_token }),
+            { headers: { 'Authorization': `Basic ${credentials}`, 'Content-Type': 'application/x-www-form-urlencoded' } }
         );
-
-        tokenData = {
-            access_token: res.data.access_token,
-            refresh_token: res.data.refresh_token,
-            expires_at: Date.now() + (res.data.expires_in * 1000) - 5000
-        };
-
+        tokenData = { access_token: res.data.access_token, refresh_token: res.data.refresh_token, expires_at: Date.now() + (res.data.expires_in * 1000) - 5000 };
         fs.writeFileSync(TOKEN_PATH, JSON.stringify(tokenData));
     }
     return tokenData.access_token;
@@ -66,46 +48,50 @@ async function getZoomAccessToken() {
 async function fetchAllExisting() {
     try {
         const token = await getZoomAccessToken();
-        console.log("🔍 Scanning LAST 2 YEARS (Debug Mode)...");
+        console.log("🔍 Starting COMPANY-WIDE Scan...");
+
+        // 1. GET ALL USERS
+        console.log("   👥 Fetching Staff List...");
+        const usersRes = await axios.get('https://api.zoom.us/v2/users?page_size=300', { 
+            headers: { 'Authorization': `Bearer ${token}` } 
+        });
+        
+        const users = usersRes.data.users;
+        console.log(`   ✅ Found ${users.length} users in this account.`);
 
         let allIDs = [];
+        const d = new Date();
+        d.setMonth(d.getMonth() - 6); // Look back 6 months
+        const fromDate = d.toISOString().split('T')[0];
 
-        for (let i = 0; i < 24; i++) {
-            let d = new Date();
-            d.setMonth(d.getMonth() - i);
-            const fromDate = d.toISOString().split('T')[0];
-
-            process.stdout.write(`📂 Checking ${fromDate.substring(0, 7)}... `);
-
-            const url = `https://api.zoom.us/v2/users/me/recordings?from=${fromDate}&page_size=300`;
-
+        // 2. LOOP THROUGH EACH USER
+        for (const user of users) {
+            console.log(`\n   👤 Scanning User: ${user.email} (${user.first_name} ${user.last_name})`);
+            
+            // Scan this user's recordings
+            const url = `https://api.zoom.us/v2/users/${user.id}/recordings?from=${fromDate}&page_size=300`;
             try {
-                const res = await axios.get(url, {
-                  headers: { 'Authorization': `Bearer ${token}` }
-                });
-
-                const count = res.data.meetings ? res.data.meetings.length : 0;
-                console.log(`Found: ${count}`);
-
-                if (res.data.meetings) {
+                const res = await axios.get(url, { headers: { 'Authorization': `Bearer ${token}` } });
+                if (res.data.meetings && res.data.meetings.length > 0) {
+                    console.log(`      🎉 Found ${res.data.meetings.length} recordings!`);
                     res.data.meetings.forEach(m => allIDs.push(m.uuid));
+                } else {
+                    console.log(`      (No recent recordings)`);
                 }
             } catch (e) {
-                console.log("❌ ERROR!");
-                if (e.response) {
-                    console.error(JSON.stringify(e.response.data));
-                } else {
-                    console.error(e.message);
-                }
+                console.log(`      ⚠️ Access Denied or Error for this user.`);
             }
         }
 
         const uniqueIDs = [...new Set(allIDs)];
         fs.writeFileSync(LOG_PATH, JSON.stringify(uniqueIDs, null, 2));
-        console.log(`✅ DONE: Found ${uniqueIDs.length} total videos.`);
+        console.log(`\n✅ SETUP COMPLETE. Ignored ${uniqueIDs.length} total videos.`);
 
     } catch (error) {
-        console.error("❌ Setup Error:", error.message);
+        console.error("❌ Error:", error.response ? error.response.data : error.message);
+        if (error.response && error.response.status === 403) {
+            console.log("💡 HINT: Did you add the 'user:read:admin' scope and Re-Login?");
+        }
     }
 }
 
