@@ -1,19 +1,26 @@
 <!DOCTYPE html>
-<html>
-    <head>
-        <title>HTML Tutorial</title>
-    </head>
-    <body>
-        <h1>Hi</h1>
-        <p>Hello</p>
-        <h2>Try</h2>
-        <a href = "https://tannyfolio.pages.dev"> This is a link i think hehe.</a>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>HTML Tutorial</title>
+</head>
+<body>
 
+  <h1>Hi</h1>
+  <p>Hello</p>
 
-        <h1>Code for Copy paste</h1>
-        <p>Setup.js</p>
-        <a>
-            <li>require('dotenv').config();
+  <h2>Try</h2>
+  <p>
+    <a href="https://tannyfolio.pages.dev">
+      This is a link I think hehe.
+    </a>
+  </p>
+
+  <h1>Code for Copy Paste</h1>
+  <p><strong>Setup.js</strong></p>
+
+  <pre><code>
+require('dotenv').config();
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
@@ -27,12 +34,30 @@ async function getZoomAccessToken() {
     let tokenData = JSON.parse(fs.readFileSync(TOKEN_PATH));
     if (Date.now() >= tokenData.expires_at) {
         console.log('🔄 Refreshing Token...');
-        const credentials = Buffer.from(`${process.env.ZOOM_CLIENT_ID}:${process.env.ZOOM_CLIENT_SECRET}`).toString('base64');
-        const res = await axios.post('https://zoom.us/oauth/token', 
-            querystring.stringify({ grant_type: 'refresh_token', refresh_token: tokenData.refresh_token }),
-            { headers: { 'Authorization': `Basic ${credentials}`, 'Content-Type': 'application/x-www-form-urlencoded' } }
+        const credentials = Buffer.from(
+          `${process.env.ZOOM_CLIENT_ID}:${process.env.ZOOM_CLIENT_SECRET}`
+        ).toString('base64');
+
+        const res = await axios.post(
+          'https://zoom.us/oauth/token',
+          querystring.stringify({
+            grant_type: 'refresh_token',
+            refresh_token: tokenData.refresh_token
+          }),
+          {
+            headers: {
+              'Authorization': `Basic ${credentials}`,
+              'Content-Type': 'application/x-www-form-urlencoded'
+            }
+          }
         );
-        tokenData = { access_token: res.data.access_token, refresh_token: res.data.refresh_token, expires_at: Date.now() + (res.data.expires_in * 1000) - 5000 };
+
+        tokenData = {
+            access_token: res.data.access_token,
+            refresh_token: res.data.refresh_token,
+            expires_at: Date.now() + (res.data.expires_in * 1000) - 5000
+        };
+
         fs.writeFileSync(TOKEN_PATH, JSON.stringify(tokenData));
     }
     return tokenData.access_token;
@@ -44,44 +69,48 @@ async function fetchAllExisting() {
         console.log("🔍 Scanning LAST 2 YEARS (Debug Mode)...");
 
         let allIDs = [];
-        
+
         for (let i = 0; i < 24; i++) {
             let d = new Date();
             d.setMonth(d.getMonth() - i);
             const fromDate = d.toISOString().split('T')[0];
-            
-            process.stdout.write(`   📂 Checking ${fromDate.substring(0, 7)}... `);
+
+            process.stdout.write(`📂 Checking ${fromDate.substring(0, 7)}... `);
 
             const url = `https://api.zoom.us/v2/users/me/recordings?from=${fromDate}&page_size=300`;
+
             try {
-                const res = await axios.get(url, { headers: { 'Authorization': `Bearer ${token}` } });
+                const res = await axios.get(url, {
+                  headers: { 'Authorization': `Bearer ${token}` }
+                });
+
                 const count = res.data.meetings ? res.data.meetings.length : 0;
                 console.log(`Found: ${count}`);
-                
+
                 if (res.data.meetings) {
                     res.data.meetings.forEach(m => allIDs.push(m.uuid));
                 }
             } catch (e) {
-                // ⚠️ HERE IS THE CHANGE: PRINT THE ERROR
                 console.log("❌ ERROR!");
                 if (e.response) {
-                    console.error(`      Reason: ${JSON.stringify(e.response.data)}`);
+                    console.error(JSON.stringify(e.response.data));
                 } else {
-                    console.error(`      Reason: ${e.message}`);
+                    console.error(e.message);
                 }
             }
         }
 
         const uniqueIDs = [...new Set(allIDs)];
         fs.writeFileSync(LOG_PATH, JSON.stringify(uniqueIDs, null, 2));
-        console.log(`\n✅ DONE: Found ${uniqueIDs.length} total videos.`);
+        console.log(`✅ DONE: Found ${uniqueIDs.length} total videos.`);
 
     } catch (error) {
         console.error("❌ Setup Error:", error.message);
     }
 }
 
-fetchAllExisting();</li>
-        </a>
-    </body>
+fetchAllExisting();
+  </code></pre>
+
+</body>
 </html>
