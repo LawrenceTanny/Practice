@@ -18,10 +18,101 @@
 
   <h1>Final</h1>
     
-  <p><strong>Server.js</strong></p>
+  <p><strong>mark_history_complete.js</strong></p>
 
   <pre><code>
-require('dotenv').config();
+    require('dotenv').config();
+const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
+const querystring = require('querystring');
+
+const TOKEN_PATH = path.join(__dirname, 'zoom_token.json');
+const LOG_PATH = path.join(__dirname, 'completed_log.json');
+
+// 🛡️ AUTH HELPER
+async function getZoomAccessToken() {
+    if (!fs.existsSync(TOKEN_PATH)) throw new Error("❌ No Token Found!");
+    let tokenData = JSON.parse(fs.readFileSync(TOKEN_PATH));
+    if (Date.now() >= tokenData.expires_at) {
+        console.log('🔄 Refreshing Zoom Token...');
+        const credentials = Buffer.from(`${process.env.ZOOM_CLIENT_ID}:${process.env.ZOOM_CLIENT_SECRET}`).toString('base64');
+        const res = await axios.post('https://zoom.us/oauth/token', 
+            querystring.stringify({ grant_type: 'refresh_token', refresh_token: tokenData.refresh_token }),
+            { headers: { 'Authorization': `Basic ${credentials}`, 'Content-Type': 'application/x-www-form-urlencoded' } }
+        );
+        tokenData = { access_token: res.data.access_token, refresh_token: res.data.refresh_token, expires_at: Date.now() + (res.data.expires_in * 1000) - 5000 };
+        fs.writeFileSync(TOKEN_PATH, JSON.stringify(tokenData));
+    }
+    return tokenData.access_token;
+}
+
+// 🛡️ MAIN SCRIPT
+async function markAllAsComplete() {
+    try {
+        console.log("🧹 STARTING HISTORY CLEANUP (Last 30 Days)...");
+        const token = await getZoomAccessToken();
+
+        // Load existing log or start empty
+        let completed = [];
+        if (fs.existsSync(LOG_PATH)) {
+            completed = JSON.parse(fs.readFileSync(LOG_PATH));
+        }
+
+        // Set Date Range: Today minus 30 days
+        const d = new Date();
+        const toDate = d.toISOString().split('T')[0];
+        d.setDate(d.getDate() - 30);
+        const fromDate = d.toISOString().split('T')[0];
+
+        console.log(`📅 Scanning range: ${fromDate} to ${toDate}`);
+
+        // Get Users
+        const usersRes = await axios.get('https://api.zoom.us/v2/users?page_size=300', { 
+            headers: { 'Authorization': `Bearer ${token}` } 
+        });
+        const users = usersRes.data.users || [];
+        console.log(`👥 Scanning ${users.length} users...`);
+
+        let newCount = 0;
+
+        for (const user of users) {
+            try {
+                const url = `https://api.zoom.us/v2/users/${user.id}/recordings?from=${fromDate}&to=${toDate}`;
+                const res = await axios.get(url, { headers: { 'Authorization': `Bearer ${token}` } });
+
+                if (!res.data.meetings) continue;
+
+                for (const meeting of res.data.meetings) {
+                    if (!completed.includes(meeting.uuid)) {
+                        completed.push(meeting.uuid);
+                        newCount++;
+                        // console.log(`   ➕ Marked: ${meeting.topic}`);
+                    }
+                }
+            } catch (err) { 
+                // Ignore individual user errors
+            }
+        }
+
+        // Save to file
+        fs.writeFileSync(LOG_PATH, JSON.stringify(completed, null, 2));
+        
+        console.log("\n✅ SUCCESS!");
+        console.log(`   Added ${newCount} old videos to the ignore list.`);
+        console.log(`   Total videos in database: ${completed.length}`);
+        console.log("   You can now start server.js safely without duplicate uploads.");
+
+    } catch (error) {
+        console.error("❌ Error:", error.message);
+    }
+}
+
+markAllAsComplete();
+  </code></pre>
+<h1><strong>server.js</strong></h1>
+<code><pre>
+    require('dotenv').config();
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
@@ -32,9 +123,9 @@ const querystring = require('querystring');
 const CHECK_INTERVAL_MINUTES = 15;
 const TOKEN_PATH = path.join(__dirname, 'zoom_token.json');
 const LOG_PATH = path.join(__dirname, 'completed_log.json');
-const CLICKUP_LAST_1_1_ID = "a1461481-3edc-4c68-b542-3f24b2386dec"; // Your Last 1:1 Column ID
+const CLICKUP_LAST_1_1_ID = "a1461481-3edc-4c68-b542-3f24b2386dec";
 
-// 🛒 SALES EQUATION TEAM (Hardcoded Parents)
+// 🛒 SALES EQUATION TEAM
 const SALES_TEAM_FOLDERS = {
     "yoshi@ecommerceequation.com.au": "1i-1JcXYriROX05FJ1vq-Si9p885cYdnh",
     "shant@ecommerceequation.com.au": "1HKQN41WjsOay2oQTPLeDlooZRi0jqRsf",
@@ -44,10 +135,10 @@ const SALES_TEAM_FOLDERS = {
 
 // 🚫 BLACKLIST
 const IGNORE_EMAILS = [
-    "jw@jaywright.com.au", "finance@ecommerceequation.com.au", "jake@ecommerceequation.com.au",
+    "finance@ecommerceequation.com.au", "jake@ecommerceequation.com.au",
     "kelsey@ecommerceequation.com.au", "lisa@ecommerceequation.com.au", "bel@ecommerceequation.com.au",
     "emilie@ecommerceequation.com.au", "carlos@ecommerceequation.com.au", "jiah@ecommerceequation.com.au",
-    "arthur@ecommerceequation.com.au", "luiza@ecommerceequation.com.au", "geneca@ecommerceequation.com.au",
+    "arthur@ecommerceequation.com.au", "luiza@ecommerceequation.com.au",
     "andres@ecommerceequation.com.au", "will@ecommerceequation.com.au", "michelles@ecommerceequation.com.au",
     "kimberley@ecommerceequation.com.au", "elizabeth@ecommerceequation.com.au", "ella@ecommerceequation.com.au",
     "kieren@ecommerceequation.com.au", "paige@ecommerceequation.com.au", "thelab@ecommerceequation.com.au",
@@ -80,26 +171,19 @@ function getFormattedDate(dateString) {
     return `${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()}`;
 }
 
-// --- 1. EMAIL SENDER (RAW API) ---
+// --- 1. EMAIL SENDER ---
 async function sendEmailNotification(status, videoName, brand, linkOrReason) {
     if (!process.env.EMAIL_USER) return;
     
-    const oauth2Client = new google.auth.OAuth2(
-        process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, "http://localhost:3000/oauth2callback"
-    );
+    const oauth2Client = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, "http://localhost:3000/oauth2callback");
     oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
     
     const subject = status === 'SUCCESS' ? `✅ Upload Success: ${videoName}` : `❌ Upload Failed: ${videoName}`;
-    const text = status === 'SUCCESS'
-        ? `Video: ${videoName}\nBrand: ${brand}\n\nSuccessfully uploaded to Drive!\nView here: ${linkOrReason}`
-        : `Video: ${videoName}\nBrand: ${brand}\n\nFailed to upload.\nReason: ${linkOrReason}`;
+    const text = status === 'SUCCESS' ? `Video: ${videoName}\nBrand: ${brand}\n\nSuccessfully uploaded to Drive!\nView here: ${linkOrReason}` : `Video: ${videoName}\nBrand: ${brand}\n\nFailed to upload.\nReason: ${linkOrReason}`;
     
     const utf8Subject = `=?utf-8?B?${Buffer.from(subject).toString('base64')}?=`;
-    const messageParts = [
-        `From: <${process.env.EMAIL_USER}>`, `To: <${process.env.EMAIL_USER}>`, `Subject: ${utf8Subject}`,
-        `MIME-Version: 1.0`, `Content-Type: text/plain; charset=utf-8`, `Content-Transfer-Encoding: 7bit`, ``, text
-    ];
+    const messageParts = [`From: <${process.env.EMAIL_USER}>`, `To: <${process.env.EMAIL_USER}>`, `Subject: ${utf8Subject}`, `MIME-Version: 1.0`, `Content-Type: text/plain; charset=utf-8`, `Content-Transfer-Encoding: 7bit`, ``, text];
     const message = messageParts.join('\n');
     const encodedMessage = Buffer.from(message).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
@@ -249,25 +333,26 @@ async function checkZoom() {
 
                 for (const meeting of res.data.meetings) {
                     if (completed.includes(meeting.uuid)) continue;
-                    if (IGNORE_TOPICS.some(ignored => meeting.topic.includes(ignored))) continue;
-
+                    
                     let links = null;
                     let brand = "";
                     let isSalesEquation = false;
 
-                    // A) SALES LOGIC
+                    // 🚨 PRIORITY CHECK 1: SALES TEAM (Bypasses Ignore Topics)
                     if (SALES_TEAM_FOLDERS[user.email]) {
                         if (!meeting.topic.includes(' x ')) continue;
                         console.log(`   🚀 New Sales Video: "${meeting.topic}"`);
                         const parentId = SALES_TEAM_FOLDERS[user.email];
-                        // Create NEW Subfolder for Sales
                         const subFolderId = await createDriveFolder(meeting.topic, parentId);
                         links = { internalFolderId: subFolderId, memberFolderId: subFolderId };
                         isSalesEquation = true;
                         brand = "Sales Equation";
                     } 
-                    // B) STANDARD LOGIC
+                    // 🚨 CHECK 2: STANDARD TEAM (Checks Ignore Topics)
                     else {
+                        // If it's NOT sales, we apply the ignore list
+                        if (IGNORE_TOPICS.some(ignored => meeting.topic.includes(ignored))) continue;
+
                         const nameParts = meeting.topic.split(' x ');
                         if (nameParts.length < 2) continue; 
                         brand = nameParts[1].split('-')[0].trim();
@@ -278,6 +363,9 @@ async function checkZoom() {
                     }
 
                     if (!links || !links.internalFolderId) {
+                        // Only log/email failure if it wasn't supposed to be ignored
+                        if (!isSalesEquation && IGNORE_TOPICS.some(ignored => meeting.topic.includes(ignored))) continue;
+                        
                         console.log(`      ❌ Brand "${brand}" missing details.`);
                         await sendEmailNotification('FAIL', meeting.topic, brand, "Brand not found in ClickUp.");
                         continue;
@@ -295,7 +383,7 @@ async function checkZoom() {
                         const downloadUrl = `${file.download_url}?access_token=${token}`;
                         const fileExt = file.file_type === 'MP4' ? '.mp4' : '.m4a';
                         
-                        // 📛 UNIVERSAL RENAMING: "Topic - Date.mp4"
+                        // 📛 UNIVERSAL RENAMING
                         let finalFileName = `${meeting.topic} - ${niceDate}${fileExt}`;
                         finalFileName = finalFileName.replace(/[:\/]/g, ''); // Sanitize
                         
@@ -323,7 +411,6 @@ async function checkZoom() {
                                      const fullLink = `https://drive.google.com/file/d/${uploadData.id}/view`;
                                      await sendEmailNotification('SUCCESS', finalFileName, brand, fullLink);
                                      
-                                     // 📅 UPDATE CLICKUP (Standard Only)
                                      if (!isSalesEquation && links.taskId && !updatedClickUp) {
                                          const dateUnix = new Date(meeting.start_time).getTime();
                                          await updateClickUpLast1on1(links.taskId, dateUnix);
@@ -341,6 +428,7 @@ async function checkZoom() {
                         }
                     }
 
+                    // ✅ MARK AS COMPLETE
                     completed.push(meeting.uuid);
                     fs.writeFileSync(LOG_PATH, JSON.stringify(completed, null, 2));
                 }
@@ -354,8 +442,7 @@ async function checkZoom() {
 
 checkZoom();
 setInterval(checkZoom, CHECK_INTERVAL_MINUTES * 60 * 1000);
-  </code></pre>
-
+</pre></code>
 
 
 </body>
