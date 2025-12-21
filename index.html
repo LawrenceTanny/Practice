@@ -21,7 +21,7 @@
   <p><strong>FinalDebug.js</strong></p>
 
   <pre><code>
-   require('dotenv').config();
+require('dotenv').config();
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
@@ -29,10 +29,10 @@ const { google } = require('googleapis');
 const querystring = require('querystring');
 const nodemailer = require('nodemailer');
 
-// --- 🛡️ CONFIGURATION ---
+// --- 🛡️ CONFIGURATION & IGNORE LISTS ---
 const TOKEN_PATH = path.join(__dirname, 'zoom_token.json');
 
-// 🛒 SALES EQUATION TEAM
+// 🛒 SALES EQUATION TEAM (Hardcoded Parents)
 const SALES_TEAM_FOLDERS = {
     "yoshi@ecommerceequation.com.au": "1i-1JcXYriROX05FJ1vq-Si9p885cYdnh",
     "shant@ecommerceequation.com.au": "1HKQN41WjsOay2oQTPLeDlooZRi0jqRsf",
@@ -71,14 +71,14 @@ const IGNORE_TOPICS = [
 let FIELD_MAP = { internal: null, member: null };
 let CLICKUP_CACHE = []; 
 
-// --- DATE HELPER ---
+// --- HELPER: DATE FORMATTER ---
 function getFormattedDate(dateString) {
     const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
     const d = new Date(dateString);
     return `${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()}`;
 }
 
-// --- 1. EMAIL SENDER ---
+// --- 1. EMAIL SENDER (REAL SEND) ---
 async function sendEmailNotification(status, videoName, brand, linkOrReason) {
     try {
         if (!process.env.EMAIL_USER) return;
@@ -94,22 +94,22 @@ async function sendEmailNotification(status, videoName, brand, linkOrReason) {
         });
 
         const subject = `[DEBUG TEST] ${status}: ${videoName}`;
-        const text = `⚠️ SIMULATION MODE (NO UPLOAD)\n\nVideo: ${videoName}\nBrand: ${brand}\nTarget: ${linkOrReason}`;
-        
+        const text = `⚠️ THIS IS A SIMULATION (NO FILES UPLOADED)\n\nVideo: ${videoName}\nBrand: ${brand}\n\nWould be uploaded to: ${linkOrReason}`;
+
         await transporter.sendMail({ from: process.env.EMAIL_USER, to: process.env.EMAIL_USER, subject, text });
-        console.log(`      📧 [DEBUG] Email sent.`);
+        console.log(`   📧 [DEBUG] Email notification sent.`);
     } catch (error) {
-        console.error("      ❌ Failed to send email:", error.message);
+        console.error("   ❌ Failed to send email:", error.message);
+        console.error("      HINT: Ensure EMAIL_USER in .env matches the account you used to generate the token.");
     }
 }
 
 // --- 2. ZOOM AUTH ---
 async function getZoomAccessToken() {
-    console.log("   🔑 Checking Zoom Token...");
     if (!fs.existsSync(TOKEN_PATH)) throw new Error("❌ No Token Found!");
     let tokenData = JSON.parse(fs.readFileSync(TOKEN_PATH));
     if (Date.now() >= tokenData.expires_at) {
-        console.log('      🔄 Refreshing Token...');
+        console.log('🔄 Refreshing Zoom Token...');
         const credentials = Buffer.from(`${process.env.ZOOM_CLIENT_ID}:${process.env.ZOOM_CLIENT_SECRET}`).toString('base64');
         const res = await axios.post('https://zoom.us/oauth/token', 
             querystring.stringify({ grant_type: 'refresh_token', refresh_token: tokenData.refresh_token }),
@@ -121,13 +121,9 @@ async function getZoomAccessToken() {
     return tokenData.access_token;
 }
 
-// --- 3. CLICKUP DEEP SCAN (MEMORY OPTIMIZED) ---
+// --- 3. CLICKUP DEEP SCAN ---
 async function refreshClickUpCache() {
     if (!process.env.CLICKUP_LIST_ID || !process.env.CLICKUP_API_KEY) return;
-    
-    console.log("   📥 Starting ClickUp Deep Scan (Lite Mode)...");
-
-    // Get Columns
     if (!FIELD_MAP.internal) {
         const fieldUrl = `https://api.clickup.com/api/v2/list/${process.env.CLICKUP_LIST_ID}/field`;
         const res = await axios.get(fieldUrl, { headers: { 'Authorization': process.env.CLICKUP_API_KEY } });
@@ -136,56 +132,39 @@ async function refreshClickUpCache() {
         if (iField) FIELD_MAP.internal = iField.id;
         if (mField) FIELD_MAP.member = mField.id;
     }
-
-    let allLiteTasks = [];
+    let allTasks = [];
     let page = 0;
     let keepGoing = true;
-
-    // Use a custom Set to avoid duplicate memory usage if necessary, but array is usually fine for <100k simple objects
     while (keepGoing) {
         try {
-            // Force Garbage Collection hint by not keeping the huge response in memory
             const url = `https://api.clickup.com/api/v2/list/${process.env.CLICKUP_LIST_ID}/task?include_closed=true&subtasks=true&page=${page}`;
             const res = await axios.get(url, { headers: { 'Authorization': process.env.CLICKUP_API_KEY } });
-            
             if (!res.data.tasks || res.data.tasks.length === 0) {
                 keepGoing = false;
             } else {
-                // 🟢 OPTIMIZATION: Extract ONLY what we need immediately
-                const liteChunk = res.data.tasks.map(t => ({
-                    n: t.name.trim().toLowerCase(), // n = name
-                    i: t.custom_fields.find(f => f.id === FIELD_MAP.internal)?.value, // i = internal link
-                    m: t.custom_fields.find(f => f.id === FIELD_MAP.member)?.value    // m = member link
-                }));
-
-                allLiteTasks = allLiteTasks.concat(liteChunk);
-                process.stdout.write(`      📄 Downloading Page ${page} (Total: ${allLiteTasks.length})... \r`);
+                allTasks = allTasks.concat(res.data.tasks);
                 page++;
             }
         } catch (e) {
-            console.error(`\n      ❌ Error on Page ${page}: ${e.message}`);
             keepGoing = false;
         }
     }
-    console.log(`\n   ✅ ClickUp Cache Complete: ${allLiteTasks.length} Brands loaded.`);
-    CLICKUP_CACHE = allLiteTasks;
+    console.log(`   ✅ ClickUp Cache Updated: ${allTasks.length} Brands loaded.`);
+    CLICKUP_CACHE = allTasks;
 }
 
 function findFolderLinksInMemory(brandName) {
-    // 🟢 OPTIMIZATION: Look up using the 'n' (name) property
-    const task = CLICKUP_CACHE.find(t => t.n === brandName.trim().toLowerCase());
-    
+    const task = CLICKUP_CACHE.find(t => t.name.trim().toLowerCase() === brandName.trim().toLowerCase());
     if (!task) return null;
-    
+    const internalVal = task.custom_fields.find(f => f.id === FIELD_MAP.internal)?.value;
+    const memberVal = task.custom_fields.find(f => f.id === FIELD_MAP.member)?.value;
     const extractId = (link) => {
         if (!link) return null;
         if (link.includes('id=')) return link.split('id=')[1];
         const parts = link.split('/');
         return parts[parts.length - 1] || parts[parts.length - 2];
     };
-    
-    // Use 'i' and 'm' properties
-    return { internalFolderId: extractId(task.i), memberFolderId: extractId(task.m) };
+    return { internalFolderId: extractId(internalVal), memberFolderId: extractId(memberVal) };
 }
 
 // --- 5. THE DEBUG LOOP ---
@@ -196,6 +175,7 @@ async function checkZoomDebug() {
         await refreshClickUpCache(); 
         const token = await getZoomAccessToken();
 
+        // 🟢 DEBUG: Check ONLY Today
         const today = new Date().toISOString().split('T')[0];
         console.log(`   🔎 Scanning ALL Recordings for TODAY: ${today}`);
 
@@ -215,32 +195,46 @@ async function checkZoomDebug() {
                 if (!res.data.meetings || res.data.meetings.length === 0) continue;
 
                 for (const meeting of res.data.meetings) {
+                    
                     if (IGNORE_TOPICS.some(ignored => meeting.topic.includes(ignored))) continue;
 
                     let links = null;
                     let brand = "";
                     let isSalesEquation = false;
                     let destinationName = "";
+                    let parentLink = "";
 
-                    // A. SALES LOGIC
+                    // ------------------------------------------------------------------
+                    // 🛣️ PATH 1: SALES EQUATION
+                    // ------------------------------------------------------------------
                     if (SALES_TEAM_FOLDERS[user.email]) {
-                        if (!meeting.topic.includes(' x ')) continue;
-                        console.log(`\n   🟣 SALES EQUATION FOUND: "${meeting.topic}"`);
+                        if (!meeting.topic.includes(' x ')) {
+                            console.log(`      ⚠️  Skipping "${meeting.topic}" (Sales User but No 'x')`);
+                            continue;
+                        }
+                        
+                        console.log(`\n   🟣 SALES EQUATION FOUND: "${meeting.topic}" (User: ${user.first_name})`);
+                        
+                        const parentId = SALES_TEAM_FOLDERS[user.email];
                         links = { internalFolderId: "SIMULATED_ID", memberFolderId: "SIMULATED_ID" };
                         isSalesEquation = true;
                         brand = "Sales Equation"; 
-                        destinationName = `[New Subfolder in Parent: ${SALES_TEAM_FOLDERS[user.email]}]`;
+                        destinationName = `[New Subfolder: "${meeting.topic}"]`;
+                        parentLink = `https://drive.google.com/drive/folders/${parentId}`;
                     } 
-                    // B. STANDARD LOGIC
+                    // ------------------------------------------------------------------
+                    // 🛣️ PATH 2: STANDARD UPLOADS
+                    // ------------------------------------------------------------------
                     else {
                         const nameParts = meeting.topic.split(' x ');
                         if (nameParts.length < 2) continue; 
+
                         brand = nameParts[1].split('-')[0].trim();
                         if (nameParts[1].includes("Scale Session")) brand = nameParts[0].trim();
 
-                        console.log(`\n   🔵 STANDARD VIDEO FOUND: "${meeting.topic}"`);
+                        console.log(`\n   🔵 STANDARD VIDEO FOUND: "${meeting.topic}" (User: ${user.first_name})`);
                         links = findFolderLinksInMemory(brand);
-                        destinationName = `[ClickUp Link]`;
+                        destinationName = "";
                     }
 
                     if (!links || !links.internalFolderId) {
@@ -248,35 +242,50 @@ async function checkZoomDebug() {
                         continue;
                     }
 
-                    // SIMULATE UPLOAD
+                    // ------------------------------------------------------------------
+                    // 📝 SIMULATE UPLOAD
+                    // ------------------------------------------------------------------
                     for (const file of meeting.recording_files) {
                         if (file.file_type !== 'MP4' && file.file_type !== 'M4A') continue;
                         const fileExt = file.file_type === 'MP4' ? '.mp4' : '.m4a';
 
+                        // 📛 RENAMING LOGIC
                         let finalFileName = `${meeting.topic.replace(/[^a-zA-Z0-9]/g, '_')}${fileExt}`;
                         if (isSalesEquation && file.file_type === 'MP4') {
                             const niceDate = getFormattedDate(meeting.start_time);
                             finalFileName = `${meeting.topic} - ${niceDate}${fileExt}`; 
                         }
 
-                        let targetType = file.file_type === 'MP4' ? "Internal Link" : "Member Link";
-                        let targetFolder = file.file_type === 'MP4' ? links.internalFolderId : links.memberFolderId;
-
+                        // Determine Target
+                        let targetFolderId = links.memberFolderId; 
+                        let targetType = "Member Link";
+                        if (file.file_type === 'MP4') {
+                            targetFolderId = links.internalFolderId;
+                            targetType = "Internal Link";
+                        }
                         if (user.email === 'travis@ecommerceequation.com.au') {
-                            targetFolder = links.internalFolderId;
+                            targetFolderId = links.internalFolderId;
                             targetType = "Internal Link (Travis Force)";
                         }
 
-                        console.log(`      📄 ${meeting.topic} (${file.file_type})`);
-                        console.log(`         ↳ Renamed: "${finalFileName}"`);
-                        console.log(`         ↳ Upload to: ${targetType} -> ${destinationName}`);
+                        // 🔗 GENERATE REAL LINK
+                        let fullLink = "";
+                        if (isSalesEquation) {
+                            fullLink = `${parentLink} (Subfolder will be created here)`;
+                        } else {
+                            fullLink = `https://drive.google.com/drive/folders/${targetFolderId}`;
+                        }
+
+                        // 🖨️ THE REQUESTED OUTPUT
+                        console.log(`      📄 ${meeting.topic} (${file.file_type}) -> Renamed to: "${finalFileName}"`);
+                        console.log(`         ↳ is uploaded to ${targetType}: ${fullLink} ${destinationName}`);
 
                         if (file.file_type === 'MP4') {
-                            await sendEmailNotification('SUCCESS', finalFileName, brand, destinationName);
+                            await sendEmailNotification('SUCCESS', finalFileName, brand, fullLink);
                         }
                     }
                 }
-            } catch (err) { /* Ignore */ }
+            } catch (err) { /* Ignore user errors */ }
         }
         console.log("\n✅ DEBUG SCAN COMPLETE.\n");
 
@@ -288,5 +297,86 @@ async function checkZoomDebug() {
 checkZoomDebug();
   </code></pre>
 
+    <p><strong>Testemail.js</strong></p>
+
+  <pre><code>
+require('dotenv').config();
+const nodemailer = require('nodemailer');
+
+async function testEmail() {
+    console.log("📧 Testing Email Connection...");
+    console.log(`   User: ${process.env.EMAIL_USER}`);
+
+    const transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: {
+            type: 'OAuth2',
+            user: process.env.EMAIL_USER,
+            clientId: process.env.GOOGLE_CLIENT_ID,
+            clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+            refreshToken: process.env.GOOGLE_REFRESH_TOKEN
+        }
+    });
+
+    try {
+        await transporter.sendMail({
+            from: process.env.EMAIL_USER,
+            to: process.env.EMAIL_USER, // Sending to yourself
+            subject: "✅ Test Email from Zoom Bot",
+            text: "If you are reading this, the email configuration is PERFECT!"
+        });
+        console.log("✅ SUCCESS! Email sent successfully.");
+    } catch (error) {
+        console.error("❌ FAILED. Here is the exact error:");
+        console.error(error);
+    }
+}
+
+testEmail();
+  </code></pre>
+
+    <p><strong>get_drive_token.js</strong></p>
+
+  <pre><code>
+const { google } = require('googleapis');
+const http = require('http');
+const url = require('url');
+require('dotenv').config();
+
+// 1. SETUP
+const oauth2Client = new google.auth.OAuth2(
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET,
+    "http://localhost:3000/oauth2callback"
+);
+
+// 2. SCOPES (Drive + Gmail)
+const scopes = [
+    'https://www.googleapis.com/auth/drive.file',
+    'https://www.googleapis.com/auth/gmail.send' // <--- This is the magic key
+];
+
+// 3. SERVER
+const server = http.createServer(async (req, res) => {
+    if (req.url.startsWith('/oauth2callback')) {
+        const qs = new url.URL(req.url, 'http://localhost:3000').searchParams;
+        const code = qs.get('code');
+        const { tokens } = await oauth2Client.getToken(code);
+        
+        console.log('\n\n✨ NEW REFRESH TOKEN (Copy to .env):');
+        console.log(tokens.refresh_token);
+        console.log('\n');
+        
+        res.end('Success! Check terminal.');
+        server.close();
+        process.exit(0);
+    }
+});
+
+server.listen(3000, () => {
+    const authUrl = oauth2Client.generateAuthUrl({ access_type: 'offline', scope: scopes });
+    console.log(`\n🔗 OPEN THIS: ${authUrl}\n`);
+});
+  </code></pre>
 </body>
 </html>
