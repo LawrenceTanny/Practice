@@ -27,7 +27,6 @@ const fs = require('fs');
 const path = require('path');
 const { google } = require('googleapis');
 const querystring = require('querystring');
-const nodemailer = require('nodemailer');
 
 // --- 🛡️ CONFIGURATION & IGNORE LISTS ---
 const TOKEN_PATH = path.join(__dirname, 'zoom_token.json');
@@ -40,12 +39,11 @@ const SALES_TEAM_FOLDERS = {
     "seanb@ecommerceequation.com.au": "1PQ_Bm3wkVXYMHPSVhoOb1AoQFQ23JwHS"
 };
 
-// 🚫 BLACKLIST
 const IGNORE_EMAILS = [
-    "jw@jaywright.com.au", "finance@ecommerceequation.com.au", "jake@ecommerceequation.com.au",
+    "finance@ecommerceequation.com.au", "jake@ecommerceequation.com.au",
     "kelsey@ecommerceequation.com.au", "lisa@ecommerceequation.com.au", "bel@ecommerceequation.com.au",
     "emilie@ecommerceequation.com.au", "carlos@ecommerceequation.com.au", "jiah@ecommerceequation.com.au",
-    "arthur@ecommerceequation.com.au", "luiza@ecommerceequation.com.au", "geneca@ecommerceequation.com.au",
+    "arthur@ecommerceequation.com.au", "luiza@ecommerceequation.com.au", 
     "andres@ecommerceequation.com.au", "will@ecommerceequation.com.au", "michelles@ecommerceequation.com.au",
     "kimberley@ecommerceequation.com.au", "elizabeth@ecommerceequation.com.au", "ella@ecommerceequation.com.au",
     "kieren@ecommerceequation.com.au", "paige@ecommerceequation.com.au", "thelab@ecommerceequation.com.au",
@@ -78,33 +76,48 @@ function getFormattedDate(dateString) {
     return `${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()}`;
 }
 
-// --- 1. EMAIL SENDER (REAL SEND) ---
+
 async function sendEmailNotification(status, videoName, brand, linkOrReason) {
+    if (!process.env.EMAIL_USER) return;
+    
+
+    const oauth2Client = new google.auth.OAuth2(
+        process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, "http://localhost:3000/oauth2callback"
+    );
+    oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
+
+
+    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+    const subject = `[DEBUG TEST] ${status}: ${videoName}`;
+    const body = `⚠️ THIS IS A SIMULATION (NO FILES UPLOADED)\n\nVideo: ${videoName}\nBrand: ${brand}\n\nWould be uploaded to: ${linkOrReason}`;
+    
+    const utf8Subject = `=?utf-8?B?${Buffer.from(subject).toString('base64')}?=`;
+    const messageParts = [
+        `From: <${process.env.EMAIL_USER}>`,
+        `To: <${process.env.EMAIL_USER}>`,
+        `Subject: ${utf8Subject}`,
+        `MIME-Version: 1.0`,
+        `Content-Type: text/plain; charset=utf-8`,
+        `Content-Transfer-Encoding: 7bit`,
+        ``,
+        body
+    ];
+    const message = messageParts.join('\n');
+
+    const encodedMessage = Buffer.from(message).toString('base64')
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
     try {
-        if (!process.env.EMAIL_USER) return;
-        const transporter = nodemailer.createTransport({
-            service: 'gmail',
-            auth: {
-                type: 'OAuth2',
-                user: process.env.EMAIL_USER,
-                clientId: process.env.GOOGLE_CLIENT_ID,
-                clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-                refreshToken: process.env.GOOGLE_REFRESH_TOKEN
-            }
+        await gmail.users.messages.send({
+            userId: 'me',
+            requestBody: { raw: encodedMessage },
         });
-
-        const subject = `[DEBUG TEST] ${status}: ${videoName}`;
-        const text = `⚠️ THIS IS A SIMULATION (NO FILES UPLOADED)\n\nVideo: ${videoName}\nBrand: ${brand}\n\nWould be uploaded to: ${linkOrReason}`;
-
-        await transporter.sendMail({ from: process.env.EMAIL_USER, to: process.env.EMAIL_USER, subject, text });
-        console.log(`   📧 [DEBUG] Email notification sent.`);
+        console.log(`   📧 [DEBUG] Email notification sent (via Raw API).`);
     } catch (error) {
         console.error("   ❌ Failed to send email:", error.message);
-        console.error("      HINT: Ensure EMAIL_USER in .env matches the account you used to generate the token.");
     }
 }
 
-// --- 2. ZOOM AUTH ---
 async function getZoomAccessToken() {
     if (!fs.existsSync(TOKEN_PATH)) throw new Error("❌ No Token Found!");
     let tokenData = JSON.parse(fs.readFileSync(TOKEN_PATH));
@@ -121,7 +134,7 @@ async function getZoomAccessToken() {
     return tokenData.access_token;
 }
 
-// --- 3. CLICKUP DEEP SCAN ---
+
 async function refreshClickUpCache() {
     if (!process.env.CLICKUP_LIST_ID || !process.env.CLICKUP_API_KEY) return;
     if (!FIELD_MAP.internal) {
@@ -167,7 +180,7 @@ function findFolderLinksInMemory(brandName) {
     return { internalFolderId: extractId(internalVal), memberFolderId: extractId(memberVal) };
 }
 
-// --- 5. THE DEBUG LOOP ---
+
 async function checkZoomDebug() {
     try {
         console.log(`\n🕒 DEBUG SIMULATION (NO UPLOADS): ${new Date().toLocaleTimeString()}`);
@@ -175,7 +188,7 @@ async function checkZoomDebug() {
         await refreshClickUpCache(); 
         const token = await getZoomAccessToken();
 
-        // 🟢 DEBUG: Check ONLY Today
+
         const today = new Date().toISOString().split('T')[0];
         console.log(`   🔎 Scanning ALL Recordings for TODAY: ${today}`);
 
@@ -201,7 +214,7 @@ async function checkZoomDebug() {
                     let links = null;
                     let brand = "";
                     let isSalesEquation = false;
-                    let destinationName = "";
+                    let destinationNote = "";
                     let parentLink = "";
 
                     // ------------------------------------------------------------------
@@ -219,7 +232,7 @@ async function checkZoomDebug() {
                         links = { internalFolderId: "SIMULATED_ID", memberFolderId: "SIMULATED_ID" };
                         isSalesEquation = true;
                         brand = "Sales Equation"; 
-                        destinationName = `[New Subfolder: "${meeting.topic}"]`;
+                        destinationNote = `[New Subfolder: "${meeting.topic}"]`;
                         parentLink = `https://drive.google.com/drive/folders/${parentId}`;
                     } 
                     // ------------------------------------------------------------------
@@ -234,7 +247,7 @@ async function checkZoomDebug() {
 
                         console.log(`\n   🔵 STANDARD VIDEO FOUND: "${meeting.topic}" (User: ${user.first_name})`);
                         links = findFolderLinksInMemory(brand);
-                        destinationName = "";
+                        destinationNote = "";
                     }
 
                     if (!links || !links.internalFolderId) {
@@ -256,7 +269,7 @@ async function checkZoomDebug() {
                             finalFileName = `${meeting.topic} - ${niceDate}${fileExt}`; 
                         }
 
-                        // Determine Target
+                        // Determine Target ID
                         let targetFolderId = links.memberFolderId; 
                         let targetType = "Member Link";
                         if (file.file_type === 'MP4') {
@@ -268,20 +281,21 @@ async function checkZoomDebug() {
                             targetType = "Internal Link (Travis Force)";
                         }
 
-                        // 🔗 GENERATE REAL LINK
-                        let fullLink = "";
+                        // 🔗 GENERATE REAL DISPLAY LINK
+                        let displayLink = "";
                         if (isSalesEquation) {
-                            fullLink = `${parentLink} (Subfolder will be created here)`;
+                            displayLink = `${parentLink} (Subfolder will be created here)`;
                         } else {
-                            fullLink = `https://drive.google.com/drive/folders/${targetFolderId}`;
+                            displayLink = `https://drive.google.com/drive/folders/${targetFolderId}`;
                         }
 
                         // 🖨️ THE REQUESTED OUTPUT
                         console.log(`      📄 ${meeting.topic} (${file.file_type}) -> Renamed to: "${finalFileName}"`);
-                        console.log(`         ↳ is uploaded to ${targetType}: ${fullLink} ${destinationName}`);
+                        console.log(`         ↳ is uploaded to ${targetType}: ${displayLink} ${destinationNote}`);
 
+                        // Send Email (MP4 Only)
                         if (file.file_type === 'MP4') {
-                            await sendEmailNotification('SUCCESS', finalFileName, brand, fullLink);
+                            await sendEmailNotification('SUCCESS', finalFileName, brand, displayLink);
                         }
                     }
                 }
@@ -297,75 +311,7 @@ async function checkZoomDebug() {
 checkZoomDebug();
   </code></pre>
 
-    <p><strong>Testemail.js</strong></p>
 
-  <pre><code>
-require('dotenv').config();
-const { google } = require('googleapis');
-
-async function sendRawEmail() {
-    console.log("📧 Attempting to send email via Google API (No Nodemailer)...");
-    console.log(`   User: ${process.env.EMAIL_USER}`);
-
-    // 1. Setup Auth
-    const oauth2Client = new google.auth.OAuth2(
-        process.env.GOOGLE_CLIENT_ID,
-        process.env.GOOGLE_CLIENT_SECRET,
-        "http://localhost:3000/oauth2callback"
-    );
-
-    oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
-
-    // 2. Initialize Gmail API
-    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
-
-    // 3. Create the Email content
-    // We must manually build the email string
-    const subject = "✅ SUCCESS: API Email Test";
-    const body = "If you see this, the 'Raw API' method works! We will update the bot to use this.";
-    
-    const utf8Subject = `=?utf-8?B?${Buffer.from(subject).toString('base64')}?=`;
-    const messageParts = [
-        `From: <${process.env.EMAIL_USER}>`,
-        `To: <${process.env.EMAIL_USER}>`,
-        `Subject: ${utf8Subject}`,
-        `MIME-Version: 1.0`,
-        `Content-Type: text/plain; charset=utf-8`,
-        `Content-Transfer-Encoding: 7bit`,
-        ``,
-        body
-    ];
-    const message = messageParts.join('\n');
-
-    // 4. Encode and Send
-    const encodedMessage = Buffer.from(message)
-        .toString('base64')
-        .replace(/\+/g, '-')
-        .replace(/\//g, '_')
-        .replace(/=+$/, '');
-
-    try {
-        const res = await gmail.users.messages.send({
-            userId: 'me',
-            requestBody: {
-                raw: encodedMessage,
-            },
-        });
-        console.log(`\n🎉 EMAIL SENT SUCCESSFULLY!`);
-        console.log(`   ID: ${res.data.id}`);
-        console.log(`   Thread ID: ${res.data.threadId}`);
-    } catch (error) {
-        console.error("\n❌ FAILED. API Error:");
-        console.error(error.message);
-        
-        if (error.response) {
-            console.error("   Details:", JSON.stringify(error.response.data, null, 2));
-        }
-    }
-}
-
-sendRawEmail();
-  </code></pre>
 
 </body>
 </html>
