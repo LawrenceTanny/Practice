@@ -301,88 +301,71 @@ checkZoomDebug();
 
   <pre><code>
 require('dotenv').config();
-const nodemailer = require('nodemailer');
+const { google } = require('googleapis');
 
-async function testEmail() {
-    console.log("📧 Testing Email Connection...");
+async function sendRawEmail() {
+    console.log("📧 Attempting to send email via Google API (No Nodemailer)...");
     console.log(`   User: ${process.env.EMAIL_USER}`);
 
-    const transporter = nodemailer.createTransport({
-        service: 'gmail',
-        auth: {
-            type: 'OAuth2',
-            user: process.env.EMAIL_USER,
-            clientId: process.env.GOOGLE_CLIENT_ID,
-            clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-            refreshToken: process.env.GOOGLE_REFRESH_TOKEN
-        }
-    });
+    // 1. Setup Auth
+    const oauth2Client = new google.auth.OAuth2(
+        process.env.GOOGLE_CLIENT_ID,
+        process.env.GOOGLE_CLIENT_SECRET,
+        "http://localhost:3000/oauth2callback"
+    );
+
+    oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
+
+    // 2. Initialize Gmail API
+    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+
+    // 3. Create the Email content
+    // We must manually build the email string
+    const subject = "✅ SUCCESS: API Email Test";
+    const body = "If you see this, the 'Raw API' method works! We will update the bot to use this.";
+    
+    const utf8Subject = `=?utf-8?B?${Buffer.from(subject).toString('base64')}?=`;
+    const messageParts = [
+        `From: <${process.env.EMAIL_USER}>`,
+        `To: <${process.env.EMAIL_USER}>`,
+        `Subject: ${utf8Subject}`,
+        `MIME-Version: 1.0`,
+        `Content-Type: text/plain; charset=utf-8`,
+        `Content-Transfer-Encoding: 7bit`,
+        ``,
+        body
+    ];
+    const message = messageParts.join('\n');
+
+    // 4. Encode and Send
+    const encodedMessage = Buffer.from(message)
+        .toString('base64')
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/, '');
 
     try {
-        await transporter.sendMail({
-            from: process.env.EMAIL_USER,
-            to: process.env.EMAIL_USER, // Sending to yourself
-            subject: "✅ Test Email from Zoom Bot",
-            text: "If you are reading this, the email configuration is PERFECT!"
+        const res = await gmail.users.messages.send({
+            userId: 'me',
+            requestBody: {
+                raw: encodedMessage,
+            },
         });
-        console.log("✅ SUCCESS! Email sent successfully.");
+        console.log(`\n🎉 EMAIL SENT SUCCESSFULLY!`);
+        console.log(`   ID: ${res.data.id}`);
+        console.log(`   Thread ID: ${res.data.threadId}`);
     } catch (error) {
-        console.error("❌ FAILED. Here is the exact error:");
-        console.error(error);
+        console.error("\n❌ FAILED. API Error:");
+        console.error(error.message);
+        
+        if (error.response) {
+            console.error("   Details:", JSON.stringify(error.response.data, null, 2));
+        }
     }
 }
 
-testEmail();
+sendRawEmail();
   </code></pre>
 
-    <p><strong>get_drive_token.js</strong></p>
-
-  <pre><code>
-const { google } = require('googleapis');
-const http = require('http');
-const url = require('url');
-require('dotenv').config();
-
-const oauth2Client = new google.auth.OAuth2(
-    process.env.GOOGLE_CLIENT_ID,
-    process.env.GOOGLE_CLIENT_SECRET,
-    "http://localhost:3000/oauth2callback"
-);
-
-// SCOPES (Gmail + Drive)
-const scopes = [
-    'https://www.googleapis.com/auth/drive.file',
-    'https://www.googleapis.com/auth/gmail.send'
-];
-
-const server = http.createServer(async (req, res) => {
-    if (req.url.startsWith('/oauth2callback')) {
-        const qs = new url.URL(req.url, 'http://localhost:3000').searchParams;
-        const code = qs.get('code');
-        
-        // Exchange code for tokens
-        const { tokens } = await oauth2Client.getToken(code);
-        
-        console.log('\n✨ NEW REFRESH TOKEN (Copy this to .env):');
-        console.log('------------------------------------------------');
-        // prompt: 'consent' ensures this prints a real string, not undefined
-        console.log(tokens.refresh_token); 
-        console.log('------------------------------------------------\n');
-        
-        res.end('Success! You have your new Refresh Token. Check the terminal.');
-        server.close();
-        process.exit(0);
-    }
-});
-
-server.listen(3000, () => {
-    const authUrl = oauth2Client.generateAuthUrl({
-        access_type: 'offline',
-        scope: scopes,
-        prompt: 'consent' // <--- THIS IS THE KEY FIX
-    });
-    console.log(`\n🔗 CLICK THIS LINK: ${authUrl}\n`);
-});
-  </code></pre>
 </body>
 </html>
