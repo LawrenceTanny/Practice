@@ -18,7 +18,7 @@
 
   <h1>Final</h1>
     
-  <p><strong>FinalDebug.js</strong></p>
+  <p><strong>Server.js</strong></p>
 
   <pre><code>
 require('dotenv').config();
@@ -28,11 +28,13 @@ const path = require('path');
 const { google } = require('googleapis');
 const querystring = require('querystring');
 
-// --- 🛡️ CONFIGURATION ---
+// --- 🛡️ CONFIGURATION & IGNORE LISTS ---
+const CHECK_INTERVAL_MINUTES = 15;
 const TOKEN_PATH = path.join(__dirname, 'zoom_token.json');
-const CLICKUP_LAST_1_1_ID = "a1461481-3edc-4c68-b542-3f24b2386dec"; // <--- YOUR NEW ID
+const LOG_PATH = path.join(__dirname, 'completed_log.json');
+const CLICKUP_LAST_1_1_ID = "a1461481-3edc-4c68-b542-3f24b2386dec"; // Your Last 1:1 Column ID
 
-// 🛒 SALES EQUATION TEAM
+// 🛒 SALES EQUATION TEAM (Hardcoded Parents)
 const SALES_TEAM_FOLDERS = {
     "yoshi@ecommerceequation.com.au": "1i-1JcXYriROX05FJ1vq-Si9p885cYdnh",
     "shant@ecommerceequation.com.au": "1HKQN41WjsOay2oQTPLeDlooZRi0jqRsf",
@@ -69,7 +71,7 @@ const IGNORE_TOPICS = [
 
 // Global Cache
 let FIELD_MAP = { internal: null, member: null };
-let CLICKUP_CACHE = [];
+let CLICKUP_CACHE = []; 
 
 // --- DATE HELPER ---
 function getFormattedDate(dateString) {
@@ -86,43 +88,37 @@ async function sendEmailNotification(status, videoName, brand, linkOrReason) {
         process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, "http://localhost:3000/oauth2callback"
     );
     oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
-
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
     
-    const subject = `[DEBUG TEST] ${status}: ${videoName}`;
-    const body = `⚠️ SIMULATION MODE (NO UPLOAD)\n\nVideo: ${videoName}\nBrand: ${brand}\nTarget: ${linkOrReason}`;
-
+    const subject = status === 'SUCCESS' ? `✅ Upload Success: ${videoName}` : `❌ Upload Failed: ${videoName}`;
+    const text = status === 'SUCCESS'
+        ? `Video: ${videoName}\nBrand: ${brand}\n\nSuccessfully uploaded to Drive!\nView here: ${linkOrReason}`
+        : `Video: ${videoName}\nBrand: ${brand}\n\nFailed to upload.\nReason: ${linkOrReason}`;
+    
     const utf8Subject = `=?utf-8?B?${Buffer.from(subject).toString('base64')}?=`;
     const messageParts = [
-        `From: <${process.env.EMAIL_USER}>`,
-        `To: <${process.env.EMAIL_USER}>`,
-        `Subject: ${utf8Subject}`,
-        `MIME-Version: 1.0`,
-        `Content-Type: text/plain; charset=utf-8`,
-        `Content-Transfer-Encoding: 7bit`,
-        ``,
-        body
+        `From: <${process.env.EMAIL_USER}>`, `To: <${process.env.EMAIL_USER}>`, `Subject: ${utf8Subject}`,
+        `MIME-Version: 1.0`, `Content-Type: text/plain; charset=utf-8`, `Content-Transfer-Encoding: 7bit`, ``, text
     ];
     const message = messageParts.join('\n');
     const encodedMessage = Buffer.from(message).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
     try {
         await gmail.users.messages.send({ userId: 'me', requestBody: { raw: encodedMessage } });
-        console.log(` 📧 [DEBUG] Email sent (Raw API).`);
+        console.log(`   📧 Email notification sent.`);
     } catch (error) {
-        console.error(" ❌ Failed to send email:", error.message);
+        console.error("   ❌ Failed to send email:", error.message);
     }
 }
 
 // --- 2. ZOOM AUTH ---
 async function getZoomAccessToken() {
-    console.log(" 🔑 Checking Zoom Token...");
     if (!fs.existsSync(TOKEN_PATH)) throw new Error("❌ No Token Found!");
     let tokenData = JSON.parse(fs.readFileSync(TOKEN_PATH));
     if (Date.now() >= tokenData.expires_at) {
-        console.log(' 🔄 Refreshing Token...');
+        console.log('   🔄 Refreshing Zoom Token...');
         const credentials = Buffer.from(`${process.env.ZOOM_CLIENT_ID}:${process.env.ZOOM_CLIENT_SECRET}`).toString('base64');
-        const res = await axios.post('https://zoom.us/oauth/token',
+        const res = await axios.post('https://zoom.us/oauth/token', 
             querystring.stringify({ grant_type: 'refresh_token', refresh_token: tokenData.refresh_token }),
             { headers: { 'Authorization': `Basic ${credentials}`, 'Content-Type': 'application/x-www-form-urlencoded' } }
         );
@@ -132,12 +128,10 @@ async function getZoomAccessToken() {
     return tokenData.access_token;
 }
 
-// --- 3. CLICKUP DEEP SCAN (LITE MODE + ID CAPTURE) ---
+// --- 3. CLICKUP FUNCTIONS ---
 async function refreshClickUpCache() {
     if (!process.env.CLICKUP_LIST_ID || !process.env.CLICKUP_API_KEY) return;
-
-    console.log(" 📥 Starting ClickUp Deep Scan (Lite Mode)...");
-
+    
     if (!FIELD_MAP.internal) {
         const fieldUrl = `https://api.clickup.com/api/v2/list/${process.env.CLICKUP_LIST_ID}/field`;
         const res = await axios.get(fieldUrl, { headers: { 'Authorization': process.env.CLICKUP_API_KEY } });
@@ -147,6 +141,7 @@ async function refreshClickUpCache() {
         if (mField) FIELD_MAP.member = mField.id;
     }
 
+    console.log("   📥 Downloading ClickUp Database (Lite Mode)...");
     let allLiteTasks = [];
     let page = 0;
     let keepGoing = true;
@@ -155,165 +150,210 @@ async function refreshClickUpCache() {
         try {
             const url = `https://api.clickup.com/api/v2/list/${process.env.CLICKUP_LIST_ID}/task?include_closed=true&subtasks=true&page=${page}`;
             const res = await axios.get(url, { headers: { 'Authorization': process.env.CLICKUP_API_KEY } });
-
             if (!res.data.tasks || res.data.tasks.length === 0) {
                 keepGoing = false;
             } else {
-                // 🟢 OPTIMIZATION: Extract name + links + TASK ID
                 const liteChunk = res.data.tasks.map(t => ({
-                    id: t.id, // <--- We now capture the ID to update the date later
+                    id: t.id,
                     n: t.name.trim().toLowerCase(),
                     i: t.custom_fields.find(f => f.id === FIELD_MAP.internal)?.value,
                     m: t.custom_fields.find(f => f.id === FIELD_MAP.member)?.value
                 }));
-
                 allLiteTasks = allLiteTasks.concat(liteChunk);
-                process.stdout.write(` 📄 Downloading Page ${page} (Total: ${allLiteTasks.length})... \r`);
+                process.stdout.write(`      Page ${page} loaded...\r`);
                 page++;
             }
-        } catch (e) {
-            console.error(`\n ❌ Error on Page ${page}: ${e.message}`);
-            keepGoing = false;
-        }
+        } catch (e) { keepGoing = false; }
     }
-    console.log(`\n ✅ ClickUp Cache Complete: ${allLiteTasks.length} Brands loaded.`);
+    console.log(`\n   ✅ ClickUp Cache Updated: ${allLiteTasks.length} Brands loaded.`);
     CLICKUP_CACHE = allLiteTasks;
 }
 
 function findFolderLinksInMemory(brandName) {
     const task = CLICKUP_CACHE.find(t => t.n === brandName.trim().toLowerCase());
     if (!task) return null;
-
     const extractId = (link) => {
         if (!link) return null;
         if (link.includes('id=')) return link.split('id=')[1];
         const parts = link.split('/');
         return parts[parts.length - 1] || parts[parts.length - 2];
     };
-
-    return { 
-        taskId: task.id, // Return Task ID so we can update it
-        internalFolderId: extractId(task.i), 
-        memberFolderId: extractId(task.m) 
-    };
+    return { taskId: task.id, internalFolderId: extractId(task.i), memberFolderId: extractId(task.m) };
 }
 
-// --- 5. THE DEBUG LOOP ---
-async function checkZoomDebug() {
+async function updateClickUpLast1on1(taskId, dateUnix) {
+    if (!taskId || !CLICKUP_LAST_1_1_ID) return;
     try {
-        console.log(`\n🕒 DEBUG SIMULATION (NO UPLOADS): ${new Date().toLocaleTimeString()}`);
+        const url = `https://api.clickup.com/api/v2/task/${taskId}/field/${CLICKUP_LAST_1_1_ID}`;
+        await axios.post(url, { value: dateUnix }, { headers: { 'Authorization': process.env.CLICKUP_API_KEY, 'Content-Type': 'application/json' } });
+        console.log(`      📅 ClickUp 'Last 1:1' updated for Task ${taskId}`);
+    } catch (e) {
+        console.error(`      ⚠️ Failed to update ClickUp Date: ${e.message}`);
+    }
+}
 
-        await refreshClickUpCache();
+// --- 4. GOOGLE DRIVE UPLOADERS ---
+async function createDriveFolder(folderName, parentId) {
+    const oauth2Client = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, "http://localhost");
+    oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
+    const drive = google.drive({ version: 'v3', auth: oauth2Client });
+    const fileMetadata = { name: folderName, mimeType: 'application/vnd.google-apps.folder', parents: [parentId] };
+    const res = await drive.files.create({ resource: fileMetadata, fields: 'id' });
+    return res.data.id;
+}
+
+async function uploadToDrive(filePath, fileName, folderId) {
+    const oauth2Client = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, "http://localhost");
+    oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
+    const drive = google.drive({ version: 'v3', auth: oauth2Client });
+    const fileMetadata = { name: fileName, parents: [folderId] };
+    const media = { mimeType: 'video/mp4', body: fs.createReadStream(filePath) };
+    const res = await drive.files.create({ resource: fileMetadata, media: media, fields: 'id, webViewLink' });
+    return res.data;
+}
+
+// --- 5. THE WATCHMAN LOOP (MAIN) ---
+async function checkZoom() {
+    try {
+        console.log(`\n🕒 Watchman Scan: ${new Date().toLocaleTimeString()}`);
         
+        await refreshClickUpCache(); // Load Database
         const token = await getZoomAccessToken();
-        const today = new Date().toISOString().split('T')[0];
-        console.log(` 🔎 Scanning ALL Recordings for TODAY: ${today}`);
 
-        const usersRes = await axios.get('https://api.zoom.us/v2/users?page_size=300', {
+        let completed = [];
+        if (fs.existsSync(LOG_PATH)) completed = JSON.parse(fs.readFileSync(LOG_PATH));
+
+        // Scan Last 7 Days
+        const d = new Date();
+        const toDate = d.toISOString().split('T')[0];
+        d.setDate(d.getDate() - 7); 
+        const fromDate = d.toISOString().split('T')[0];
+
+        // 1. GET ALL USERS
+        const usersRes = await axios.get('https://api.zoom.us/v2/users?page_size=300', { 
             headers: { 'Authorization': `Bearer ${token}` } 
         });
         const users = usersRes.data.users || [];
-        console.log(` 👥 Scanning ${users.length} users...`);
+        console.log(`   👥 Scanning ${users.length} users...`);
 
+        // 2. SCAN EACH USER
         for (const user of users) {
             if (IGNORE_EMAILS.includes(user.email)) continue;
 
             try {
-                const url = `https://api.zoom.us/v2/users/${user.id}/recordings?from=${today}&to=${today}`;
-                const res = await axios.get(url, { headers: { 'Authorization': `Bearer ${token}` } });
+                const res = await axios.get(`https://api.zoom.us/v2/users/${user.id}/recordings?from=${fromDate}&to=${toDate}`, { 
+                    headers: { 'Authorization': `Bearer ${token}` } 
+                });
 
                 if (!res.data.meetings || res.data.meetings.length === 0) continue;
 
                 for (const meeting of res.data.meetings) {
+                    if (completed.includes(meeting.uuid)) continue;
                     if (IGNORE_TOPICS.some(ignored => meeting.topic.includes(ignored))) continue;
 
                     let links = null;
                     let brand = "";
                     let isSalesEquation = false;
-                    let parentLink = "";
 
-                    // A. SALES LOGIC
+                    // A) SALES LOGIC
                     if (SALES_TEAM_FOLDERS[user.email]) {
                         if (!meeting.topic.includes(' x ')) continue;
-                        console.log(`\n 🟣 SALES EQUATION FOUND: "${meeting.topic}"`);
-                        links = { internalFolderId: "SIMULATED_ID", memberFolderId: "SIMULATED_ID" };
+                        console.log(`   🚀 New Sales Video: "${meeting.topic}"`);
+                        const parentId = SALES_TEAM_FOLDERS[user.email];
+                        // Create NEW Subfolder for Sales
+                        const subFolderId = await createDriveFolder(meeting.topic, parentId);
+                        links = { internalFolderId: subFolderId, memberFolderId: subFolderId };
                         isSalesEquation = true;
                         brand = "Sales Equation";
-                        parentLink = `https://drive.google.com/drive/folders/${SALES_TEAM_FOLDERS[user.email]}`;
-                    }
-                    // B. STANDARD LOGIC
+                    } 
+                    // B) STANDARD LOGIC
                     else {
                         const nameParts = meeting.topic.split(' x ');
-                        if (nameParts.length < 2) continue;
+                        if (nameParts.length < 2) continue; 
                         brand = nameParts[1].split('-')[0].trim();
                         if (nameParts[1].includes("Scale Session")) brand = nameParts[0].trim();
 
-                        console.log(`\n 🔵 STANDARD VIDEO FOUND: "${meeting.topic}"`);
+                        console.log(`   🚀 New Standard Video: "${meeting.topic}" (User: ${user.first_name})`);
                         links = findFolderLinksInMemory(brand);
                     }
 
                     if (!links || !links.internalFolderId) {
-                        console.log(` ❌ Brand "${brand}" missing details.`);
+                        console.log(`      ❌ Brand "${brand}" missing details.`);
+                        await sendEmailNotification('FAIL', meeting.topic, brand, "Brand not found in ClickUp.");
                         continue;
                     }
 
-                    // --- SIMULATE ACTIONS ---
-                    
-                    // 1. DATE FORMATTING (Updated for ALL videos)
+                    console.log(`      ✅ Destination Found! Downloading...`);
+
+                    // C) DOWNLOAD & UPLOAD
+                    let updatedClickUp = false;
                     const niceDate = getFormattedDate(meeting.start_time);
-                    
-                    // 2. CLICKUP UPDATE SIMULATION (Only for Standard, Sales usually doesn't have ClickUp tasks)
-                    if (links.taskId && !isSalesEquation) {
-                        const dateUnix = new Date(meeting.start_time).getTime();
-                        console.log(` 🔄 [SIMULATION] Updating ClickUp 'Last 1:1' for Task ${links.taskId}`);
-                        console.log(`    ↳ New Value: ${niceDate} (Unix: ${dateUnix})`);
-                    }
 
                     for (const file of meeting.recording_files) {
                         if (file.file_type !== 'MP4' && file.file_type !== 'M4A') continue;
+
+                        const downloadUrl = `${file.download_url}?access_token=${token}`;
                         const fileExt = file.file_type === 'MP4' ? '.mp4' : '.m4a';
-
-                        // 3. RENAMING LOGIC (Universal Date Addition)
-                        // Koby x Silky Tots -> Koby x Silky Tots - 22 December 2025.mp4
-                        let finalFileName = `${meeting.topic} - ${niceDate}${fileExt}`;
                         
-                        // Sanitize filename just in case (remove slashes/colons)
-                        finalFileName = finalFileName.replace(/[:\/]/g, '');
+                        // 📛 UNIVERSAL RENAMING: "Topic - Date.mp4"
+                        let finalFileName = `${meeting.topic} - ${niceDate}${fileExt}`;
+                        finalFileName = finalFileName.replace(/[:\/]/g, ''); // Sanitize
+                        
+                        const tempPath = path.join(__dirname, finalFileName);
 
-                        let targetType = file.file_type === 'MP4' ? "Internal Link" : "Member Link";
-                        let targetFolderId = file.file_type === 'MP4' ? links.internalFolderId : links.memberFolderId;
+                        try {
+                            const writer = fs.createWriteStream(tempPath);
+                            const streamRes = await axios({ url: downloadUrl, method: 'GET', responseType: 'stream' });
+                            streamRes.data.pipe(writer);
 
-                        if (user.email === 'travis@ecommerceequation.com.au') {
-                            targetFolderId = links.internalFolderId;
-                            targetType = "Internal Link (Travis Force)";
-                        }
+                            await new Promise((resolve, reject) => {
+                                writer.on('finish', resolve);
+                                writer.on('error', reject);
+                            });
 
-                        let displayLink = "";
-                        if (isSalesEquation) {
-                            displayLink = `${parentLink} (New Subfolder)`;
-                        } else {
-                            displayLink = `https://drive.google.com/drive/folders/${targetFolderId}`;
-                        }
+                            let targetFolder = links.memberFolderId;
+                            if (file.file_type === 'MP4') targetFolder = links.internalFolderId;
+                            if (user.email === 'travis@ecommerceequation.com.au') targetFolder = links.internalFolderId;
 
-                        console.log(` 📄 ${meeting.topic} (${file.file_type})`);
-                        console.log(` ↳ Renamed: "${finalFileName}"`);
-                        console.log(` ↳ Upload to: ${targetType} -> ${displayLink}`);
+                            if (targetFolder) {
+                                console.log(`      📤 Uploading "${finalFileName}"...`);
+                                const uploadData = await uploadToDrive(tempPath, finalFileName, targetFolder);
+                                
+                                if (file.file_type === 'MP4') {
+                                     const fullLink = `https://drive.google.com/file/d/${uploadData.id}/view`;
+                                     await sendEmailNotification('SUCCESS', finalFileName, brand, fullLink);
+                                     
+                                     // 📅 UPDATE CLICKUP (Standard Only)
+                                     if (!isSalesEquation && links.taskId && !updatedClickUp) {
+                                         const dateUnix = new Date(meeting.start_time).getTime();
+                                         await updateClickUpLast1on1(links.taskId, dateUnix);
+                                         updatedClickUp = true;
+                                     }
+                                }
+                                console.log(`      🎉 Upload Complete!`);
+                            }
 
-                        if (file.file_type === 'MP4') {
-                            await sendEmailNotification('SUCCESS', finalFileName, brand, displayLink);
+                        } catch (err) {
+                            console.error(`      ❌ Error: ${err.message}`);
+                            await sendEmailNotification('FAIL', meeting.topic, brand, err.message);
+                        } finally {
+                            if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); 
                         }
                     }
+
+                    completed.push(meeting.uuid);
+                    fs.writeFileSync(LOG_PATH, JSON.stringify(completed, null, 2));
                 }
-            } catch (err) { /* Ignore */ }
+            } catch (err) { /* Ignore user errors */ }
         }
-        console.log("\n✅ DEBUG SCAN COMPLETE.\n");
 
     } catch (error) {
         console.error("❌ Watchman Error:", error.message);
     }
 }
 
-checkZoomDebug();
+checkZoom();
+setInterval(checkZoom, CHECK_INTERVAL_MINUTES * 60 * 1000);
   </code></pre>
 
 
