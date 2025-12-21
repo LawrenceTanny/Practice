@@ -66,7 +66,7 @@ const IGNORE_TOPICS = [
     "Ecommerce Equation", "Ecommerce Equation Zoom", "Accelerate Call", "CUSTOMERS Zoom", "Boardroom"
 ];
 
-// Global Cache (Only for IDs)
+// Global Cache (Just for IDs)
 let FIELD_MAP = { internal: null, member: null };
 
 // --- DATE HELPER ---
@@ -76,17 +76,15 @@ function getFormattedDate(dateString) {
     return `${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()}`;
 }
 
-// --- 1. EMAIL SENDER (RAW API - FIXES 535 ERROR) ---
+// --- 1. EMAIL SENDER (RAW API - NO 535 ERRORS) ---
 async function sendEmailNotification(status, videoName, brand, linkOrReason) {
     if (!process.env.EMAIL_USER) return;
     
-    // Auth Setup
     const oauth2Client = new google.auth.OAuth2(
         process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, "http://localhost:3000/oauth2callback"
     );
     oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
 
-    // Gmail API Setup
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
     
     const subject = `[DEBUG TEST] ${status}: ${videoName}`;
@@ -94,21 +92,15 @@ async function sendEmailNotification(status, videoName, brand, linkOrReason) {
 
     const utf8Subject = `=?utf-8?B?${Buffer.from(subject).toString('base64')}?=`;
     const messageParts = [
-        `From: <${process.env.EMAIL_USER}>`,
-        `To: <${process.env.EMAIL_USER}>`,
-        `Subject: ${utf8Subject}`,
-        `MIME-Version: 1.0`,
-        `Content-Type: text/plain; charset=utf-8`,
-        `Content-Transfer-Encoding: 7bit`,
-        ``,
-        body
+        `From: <${process.env.EMAIL_USER}>`, `To: <${process.env.EMAIL_USER}>`, `Subject: ${utf8Subject}`,
+        `MIME-Version: 1.0`, `Content-Type: text/plain; charset=utf-8`, `Content-Transfer-Encoding: 7bit`, ``, body
     ];
     const message = messageParts.join('\n');
     const encodedMessage = Buffer.from(message).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
     try {
         await gmail.users.messages.send({ userId: 'me', requestBody: { raw: encodedMessage } });
-        console.log(`   📧 [DEBUG] Email sent (Raw API).`);
+        console.log(`   📧 [DEBUG] Email sent.`);
     } catch (error) {
         console.error("   ❌ Failed to send email:", error.message);
     }
@@ -119,7 +111,7 @@ async function getZoomAccessToken() {
     if (!fs.existsSync(TOKEN_PATH)) throw new Error("❌ No Token Found!");
     let tokenData = JSON.parse(fs.readFileSync(TOKEN_PATH));
     if (Date.now() >= tokenData.expires_at) {
-        console.log('🔄 Refreshing Zoom Token...');
+        console.log('   🔄 Refreshing Zoom Token...');
         const credentials = Buffer.from(`${process.env.ZOOM_CLIENT_ID}:${process.env.ZOOM_CLIENT_SECRET}`).toString('base64');
         const res = await axios.post('https://zoom.us/oauth/token', 
             querystring.stringify({ grant_type: 'refresh_token', refresh_token: tokenData.refresh_token }),
@@ -131,9 +123,10 @@ async function getZoomAccessToken() {
     return tokenData.access_token;
 }
 
-// --- 3. CLICKUP SNIPER SEARCH (Fast & Light) ---
+// --- 3. CLICKUP UTILS (Init + Search) ---
 async function initClickUpColumns() {
     if (FIELD_MAP.internal) return;
+    // We just need the Column IDs once. This is fast (1 request).
     const fieldUrl = `https://api.clickup.com/api/v2/list/${process.env.CLICKUP_LIST_ID}/field`;
     const res = await axios.get(fieldUrl, { headers: { 'Authorization': process.env.CLICKUP_API_KEY } });
     const iField = res.data.fields.find(f => f.name === process.env.CLICKUP_INTERNAL_COL_NAME);
@@ -143,8 +136,8 @@ async function initClickUpColumns() {
 }
 
 async function searchBrandOnDemand(brandName) {
+    // 🟢 SEARCH-ON-DEMAND: Only asks ClickUp for the specific brand we need
     try {
-        // Search API (returns only matches, not the whole DB)
         const searchUrl = `https://api.clickup.com/api/v2/list/${process.env.CLICKUP_LIST_ID}/task?include_closed=true&search=${encodeURIComponent(brandName)}`;
         const res = await axios.get(searchUrl, { headers: { 'Authorization': process.env.CLICKUP_API_KEY } });
         
@@ -168,17 +161,19 @@ async function searchBrandOnDemand(brandName) {
     }
 }
 
-// --- 4. THE DEBUG LOOP ---
+// --- 5. THE DEBUG LOOP ---
 async function checkZoomDebug() {
     try {
-        console.log(`\n🕒 DEBUG SIMULATION (SNIPER MODE): ${new Date().toLocaleTimeString()}`);
+        console.log(`\n🕒 DEBUG SIMULATION (ZOOM FIRST MODE): ${new Date().toLocaleTimeString()}`);
         
-        await initClickUpColumns(); // Quick setup
+        // 1. Init Zoom & Columns (Fast)
         const token = await getZoomAccessToken();
+        await initClickUpColumns(); 
+
         const today = new Date().toISOString().split('T')[0];
-        
         console.log(`   🔎 Scanning ALL Recordings for TODAY: ${today}`);
 
+        // 2. Scan Users
         const usersRes = await axios.get('https://api.zoom.us/v2/users?page_size=300', { 
             headers: { 'Authorization': `Bearer ${token}` } 
         });
@@ -189,6 +184,7 @@ async function checkZoomDebug() {
             if (IGNORE_EMAILS.includes(user.email)) continue;
 
             try {
+                // 3. Scan Recordings (This happens BEFORE heavy ClickUp work)
                 const url = `https://api.zoom.us/v2/users/${user.id}/recordings?from=${today}&to=${today}`;
                 const res = await axios.get(url, { headers: { 'Authorization': `Bearer ${token}` } });
 
@@ -211,7 +207,7 @@ async function checkZoomDebug() {
                         brand = "Sales Equation";
                         parentLink = `https://drive.google.com/drive/folders/${SALES_TEAM_FOLDERS[user.email]}`;
                     } 
-                    // B. STANDARD LOGIC (Sniper Search)
+                    // B. STANDARD LOGIC (NOW SEARCHES ON DEMAND)
                     else {
                         const nameParts = meeting.topic.split(' x ');
                         if (nameParts.length < 2) continue; 
@@ -219,11 +215,13 @@ async function checkZoomDebug() {
                         if (nameParts[1].includes("Scale Session")) brand = nameParts[0].trim();
 
                         console.log(`\n   🔵 STANDARD VIDEO FOUND: "${meeting.topic}"`);
+                        
+                        // 🟢 THIS IS THE FIX: We only ask ClickUp NOW, because we found a video.
                         links = await searchBrandOnDemand(brand);
                     }
 
                     if (!links || !links.internalFolderId) {
-                        console.log(`      ❌ Brand "${brand}" missing details.`);
+                        console.log(`      ❌ Brand "${brand}" missing details (or not found in ClickUp).`);
                         continue;
                     }
 
@@ -249,10 +247,10 @@ async function checkZoomDebug() {
                             targetType = "Internal Link (Travis Force)";
                         }
 
-                        // GENERATE REAL DISPLAY LINK
+                        // 🟢 REAL LINKS IN CONSOLE
                         let fullLink = "";
                         if (isSalesEquation) {
-                            fullLink = `${parentLink} (New Subfolder will be created here)`;
+                            fullLink = `${parentLink} (New Subfolder)`;
                         } else {
                             fullLink = `https://drive.google.com/drive/folders/${targetFolderId}`;
                         }
