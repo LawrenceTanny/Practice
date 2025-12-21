@@ -39,6 +39,7 @@ const SALES_TEAM_FOLDERS = {
     "seanb@ecommerceequation.com.au": "1PQ_Bm3wkVXYMHPSVhoOb1AoQFQ23JwHS"
 };
 
+// 🚫 BLACKLIST (Your email removed)
 const IGNORE_EMAILS = [
     "finance@ecommerceequation.com.au", "jake@ecommerceequation.com.au",
     "kelsey@ecommerceequation.com.au", "lisa@ecommerceequation.com.au", "bel@ecommerceequation.com.au",
@@ -76,18 +77,17 @@ function getFormattedDate(dateString) {
     return `${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()}`;
 }
 
-
+// --- 1. EMAIL SENDER (RAW API METHOD - FIXED) ---
 async function sendEmailNotification(status, videoName, brand, linkOrReason) {
     if (!process.env.EMAIL_USER) return;
     
-
     const oauth2Client = new google.auth.OAuth2(
         process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, "http://localhost:3000/oauth2callback"
     );
     oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
 
-
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+    
     const subject = `[DEBUG TEST] ${status}: ${videoName}`;
     const body = `⚠️ THIS IS A SIMULATION (NO FILES UPLOADED)\n\nVideo: ${videoName}\nBrand: ${brand}\n\nWould be uploaded to: ${linkOrReason}`;
     
@@ -118,6 +118,7 @@ async function sendEmailNotification(status, videoName, brand, linkOrReason) {
     }
 }
 
+// --- 2. ZOOM AUTH ---
 async function getZoomAccessToken() {
     if (!fs.existsSync(TOKEN_PATH)) throw new Error("❌ No Token Found!");
     let tokenData = JSON.parse(fs.readFileSync(TOKEN_PATH));
@@ -134,10 +135,13 @@ async function getZoomAccessToken() {
     return tokenData.access_token;
 }
 
-
+// --- 3. CLICKUP DEEP SCAN (WITH LOADING BAR) ---
 async function refreshClickUpCache() {
     if (!process.env.CLICKUP_LIST_ID || !process.env.CLICKUP_API_KEY) return;
+    
+    // Get Column IDs
     if (!FIELD_MAP.internal) {
+        // console.log("   🔍 Mapping Columns...");
         const fieldUrl = `https://api.clickup.com/api/v2/list/${process.env.CLICKUP_LIST_ID}/field`;
         const res = await axios.get(fieldUrl, { headers: { 'Authorization': process.env.CLICKUP_API_KEY } });
         const iField = res.data.fields.find(f => f.name === process.env.CLICKUP_INTERNAL_COL_NAME);
@@ -145,24 +149,31 @@ async function refreshClickUpCache() {
         if (iField) FIELD_MAP.internal = iField.id;
         if (mField) FIELD_MAP.member = mField.id;
     }
+
+    console.log("   📥 Downloading ClickUp Database (Deep Scan)...");
     let allTasks = [];
     let page = 0;
     let keepGoing = true;
+
     while (keepGoing) {
         try {
             const url = `https://api.clickup.com/api/v2/list/${process.env.CLICKUP_LIST_ID}/task?include_closed=true&subtasks=true&page=${page}`;
             const res = await axios.get(url, { headers: { 'Authorization': process.env.CLICKUP_API_KEY } });
+            
             if (!res.data.tasks || res.data.tasks.length === 0) {
                 keepGoing = false;
             } else {
                 allTasks = allTasks.concat(res.data.tasks);
+                // LOADING PROGRESS
+                process.stdout.write(`      Page ${page} loaded (${res.data.tasks.length} items)...\r`);
                 page++;
             }
         } catch (e) {
+            console.error("\n   ⚠️ ClickUp Error: " + e.message);
             keepGoing = false;
         }
     }
-    console.log(`   ✅ ClickUp Cache Updated: ${allTasks.length} Brands loaded.`);
+    console.log(`\n   ✅ ClickUp Cache Updated: ${allTasks.length} Brands loaded in memory.`);
     CLICKUP_CACHE = allTasks;
 }
 
@@ -180,15 +191,16 @@ function findFolderLinksInMemory(brandName) {
     return { internalFolderId: extractId(internalVal), memberFolderId: extractId(memberVal) };
 }
 
-
+// --- 5. THE DEBUG LOOP ---
 async function checkZoomDebug() {
     try {
         console.log(`\n🕒 DEBUG SIMULATION (NO UPLOADS): ${new Date().toLocaleTimeString()}`);
         
+        // 1. LOADING: Download database first
         await refreshClickUpCache(); 
         const token = await getZoomAccessToken();
 
-
+        // 🟢 DEBUG: Check ONLY Today
         const today = new Date().toISOString().split('T')[0];
         console.log(`   🔎 Scanning ALL Recordings for TODAY: ${today}`);
 
