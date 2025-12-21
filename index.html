@@ -16,50 +16,66 @@
     </a>
   </p>
 
-  <h1>Add Scope: user:read:admin</h1>
+  <h1>Go to Google Cloud Console,  OAuth 2.0 Client ID then Authorized redirect URIs. paste this. http://localhost:3000/oauth2callback</h1>
   <p><strong>get_Drive_token.js</strong></p>
 
   <pre><code>
 const { google } = require('googleapis');
 const http = require('http');
 const url = require('url');
-const opn = require('open'); // If this fails, just copy the link manually
+const open = require('open'); // You might need to install this: npm install open
 require('dotenv').config();
 
+// 1. SETUP CLIENT
 const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
     "http://localhost:3000/oauth2callback"
 );
 
-// REQUESTING BOTH DRIVE AND GMAIL PERMISSIONS
+// 2. DEFINE SCOPES (Drive + Gmail)
 const scopes = [
     'https://www.googleapis.com/auth/drive.file',
     'https://www.googleapis.com/auth/gmail.send'
 ];
 
+// 3. START SERVER
 const server = http.createServer(async (req, res) => {
     if (req.url.startsWith('/oauth2callback')) {
-        const qs = new url.URL(req.url, 'http://localhost:3000').searchParams;
-        const code = qs.get('code');
-        
-        const { tokens } = await oauth2Client.getToken(code);
-        console.log('\n\n✨ HERE IS YOUR NEW REFRESH TOKEN (COPY THIS TO .ENV):');
-        console.log(tokens.refresh_token);
-        console.log('\n');
+        try {
+            const qs = new url.URL(req.url, 'http://localhost:3000').searchParams;
+            const code = qs.get('code');
+            
+            console.log('🔄 Exchanging code for token...');
+            const { tokens } = await oauth2Client.getToken(code);
+            
+            console.log('\n✨ SUCCESS! HERE IS YOUR NEW REFRESH TOKEN:');
+            console.log('------------------------------------------------');
+            console.log(tokens.refresh_token);
+            console.log('------------------------------------------------\n');
+            console.log('👉 Copy the code above and paste it into your .env file as GOOGLE_REFRESH_TOKEN');
 
-        res.end('Authentication successful! Check your terminal for the Refresh Token.');
-        server.close();
-        process.exit(0);
+            res.end('Authentication successful! You can close this window and check your terminal.');
+            server.close();
+            process.exit(0);
+        } catch (err) {
+            console.error('❌ Error getting token:', err.message);
+            res.end('Error getting token. Check terminal.');
+        }
     }
 });
 
-server.listen(3000, () => {
+server.listen(3000, async () => {
     const authUrl = oauth2Client.generateAuthUrl({
         access_type: 'offline',
-        scope: scopes
+        scope: scopes,
+        prompt: 'consent' // Forces Google to give a Refresh Token every time
     });
-    console.log('Authorize this app by visiting this url:', authUrl);
+    console.log('Waiting for authentication...');
+    console.log(`\n🔗 OPEN THIS LINK: ${authUrl}\n`);
+    
+    // Auto-open browser
+    try { await open(authUrl); } catch (e) { /* ignore if auto-open fails */ }
 });
   </code></pre>
 
@@ -694,6 +710,97 @@ async function checkZoomDebug() {
 }
 
 checkZoomDebug();
+  </code></pre>
+
+  <p><strong>Clickup.js</strong></p>
+  <pre><code>
+    require('dotenv').config();
+const axios = require('axios');
+
+// 🚫 NOISE FILTER: Ignore tasks containing these words
+const IGNORE_KEYWORDS = [
+    "Trial Ends",
+    "Move to Foundation",
+    "Move to Foundations",
+    "Onboarding",
+    "Allocations",
+    "End of Month"
+];
+
+async function inspectClickUpClean() {
+    console.log("🕵️ Connecting to ClickUp (Clean Mode)...");
+
+    if (!process.env.CLICKUP_API_KEY || !process.env.CLICKUP_LIST_ID) {
+        return console.error("❌ Error: Missing API Key or List ID.");
+    }
+
+    try {
+        // 1. GET COLUMN IDs
+        console.log("   🔍 Mapping Columns...");
+        const fieldUrl = `https://api.clickup.com/api/v2/list/${process.env.CLICKUP_LIST_ID}/field`;
+        const fieldRes = await axios.get(fieldUrl, { headers: { 'Authorization': process.env.CLICKUP_API_KEY } });
+        
+        const internalField = fieldRes.data.fields.find(f => f.name === process.env.CLICKUP_INTERNAL_COL_NAME);
+        const memberField = fieldRes.data.fields.find(f => f.name === process.env.CLICKUP_MEMBER_COL_NAME);
+
+        if (!internalField || !memberField) {
+            console.log("\n❌ ERROR: Could not find your specific columns!");
+            return;
+        }
+
+        // 2. FETCH ALL TASKS (Deep Scan)
+        console.log("   📥 Downloading Database...");
+        let allTasks = [];
+        let page = 0;
+        let keepGoing = true;
+
+        while (keepGoing) {
+            const taskUrl = `https://api.clickup.com/api/v2/list/${process.env.CLICKUP_LIST_ID}/task?include_closed=true&subtasks=true&page=${page}`;
+            const res = await axios.get(taskUrl, { headers: { 'Authorization': process.env.CLICKUP_API_KEY } });
+            
+            if (!res.data.tasks || res.data.tasks.length === 0) {
+                keepGoing = false;
+            } else {
+                allTasks = allTasks.concat(res.data.tasks);
+                process.stdout.write(`      Page ${page} loaded... \r`);
+                page++;
+            }
+        }
+
+        console.log(`\n\n   📝 VALID BRANDS FOUND:`);
+        console.log("   ===================================================");
+
+        let validCount = 0;
+
+        allTasks.forEach((task) => {
+            // FILTER 1: Check Ignore Keywords
+            const isJunk = IGNORE_KEYWORDS.some(word => task.name.includes(word));
+            if (isJunk) return;
+
+            // FILTER 2: Check for Drive Links (Brands MUST have at least one link)
+            const internalVal = task.custom_fields.find(f => f.id === internalField.id)?.value;
+            const memberVal = task.custom_fields.find(f => f.id === memberField.id)?.value;
+
+            if (!internalVal && !memberVal) return; // Skip empty tasks
+
+            validCount++;
+            console.log(`   🏷️  ${task.name}`);
+            console.log(`       🔐 Internal: ${internalVal ? "✅ OK" : "❌ Missing"}`);
+            console.log(`       👤 Member:   ${memberVal ? "✅ OK" : "❌ Missing"}`);
+            console.log("   ---------------------------------------------------");
+        });
+
+        console.log(`\n✅ Scan Complete.`);
+        console.log(`   - Total Items Scanned: ${allTasks.length}`);
+        console.log(`   - Valid Brands Found:  ${validCount}`);
+        console.log(`   - Junk Hidden:         ${allTasks.length - validCount}`);
+
+    } catch (error) {
+        console.error("❌ Error:", error.response ? error.response.data : error.message);
+    }
+}
+
+inspectClickUpClean();
   </code></pre>
 </body>
 </html>
