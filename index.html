@@ -343,39 +343,45 @@ const http = require('http');
 const url = require('url');
 require('dotenv').config();
 
-// 1. SETUP
 const oauth2Client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
     "http://localhost:3000/oauth2callback"
 );
 
-// 2. SCOPES (Drive + Gmail)
+// SCOPES (Gmail + Drive)
 const scopes = [
     'https://www.googleapis.com/auth/drive.file',
-    'https://www.googleapis.com/auth/gmail.send' // <--- This is the magic key
+    'https://www.googleapis.com/auth/gmail.send'
 ];
 
-// 3. SERVER
 const server = http.createServer(async (req, res) => {
     if (req.url.startsWith('/oauth2callback')) {
         const qs = new url.URL(req.url, 'http://localhost:3000').searchParams;
         const code = qs.get('code');
+        
+        // Exchange code for tokens
         const { tokens } = await oauth2Client.getToken(code);
         
-        console.log('\n\n✨ NEW REFRESH TOKEN (Copy to .env):');
-        console.log(tokens.refresh_token);
-        console.log('\n');
+        console.log('\n✨ NEW REFRESH TOKEN (Copy this to .env):');
+        console.log('------------------------------------------------');
+        // prompt: 'consent' ensures this prints a real string, not undefined
+        console.log(tokens.refresh_token); 
+        console.log('------------------------------------------------\n');
         
-        res.end('Success! Check terminal.');
+        res.end('Success! You have your new Refresh Token. Check the terminal.');
         server.close();
         process.exit(0);
     }
 });
 
 server.listen(3000, () => {
-    const authUrl = oauth2Client.generateAuthUrl({ access_type: 'offline', scope: scopes });
-    console.log(`\n🔗 OPEN THIS: ${authUrl}\n`);
+    const authUrl = oauth2Client.generateAuthUrl({
+        access_type: 'offline',
+        scope: scopes,
+        prompt: 'consent' // <--- THIS IS THE KEY FIX
+    });
+    console.log(`\n🔗 CLICK THIS LINK: ${authUrl}\n`);
 });
   </code></pre>
 </body>
