@@ -30,6 +30,7 @@ const querystring = require('querystring');
 
 // --- 🛡️ CONFIGURATION ---
 const TOKEN_PATH = path.join(__dirname, 'zoom_token.json');
+const CLICKUP_LAST_1_1_ID = "a1461481-3edc-4c68-b542-3f24b2386dec"; // <--- YOUR NEW ID
 
 // 🛒 SALES EQUATION TEAM
 const SALES_TEAM_FOLDERS = {
@@ -77,17 +78,15 @@ function getFormattedDate(dateString) {
     return `${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()}`;
 }
 
-// --- 1. EMAIL SENDER (RAW API - FIXES 535 ERROR) ---
+// --- 1. EMAIL SENDER (RAW API) ---
 async function sendEmailNotification(status, videoName, brand, linkOrReason) {
     if (!process.env.EMAIL_USER) return;
     
-    // Auth Setup
     const oauth2Client = new google.auth.OAuth2(
         process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, "http://localhost:3000/oauth2callback"
     );
     oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
 
-    // Gmail API Setup
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
     
     const subject = `[DEBUG TEST] ${status}: ${videoName}`;
@@ -133,13 +132,12 @@ async function getZoomAccessToken() {
     return tokenData.access_token;
 }
 
-// --- 3. CLICKUP DEEP SCAN (MEMORY OPTIMIZED - LITE MODE) ---
+// --- 3. CLICKUP DEEP SCAN (LITE MODE + ID CAPTURE) ---
 async function refreshClickUpCache() {
     if (!process.env.CLICKUP_LIST_ID || !process.env.CLICKUP_API_KEY) return;
 
     console.log(" 📥 Starting ClickUp Deep Scan (Lite Mode)...");
 
-    // Get Columns
     if (!FIELD_MAP.internal) {
         const fieldUrl = `https://api.clickup.com/api/v2/list/${process.env.CLICKUP_LIST_ID}/field`;
         const res = await axios.get(fieldUrl, { headers: { 'Authorization': process.env.CLICKUP_API_KEY } });
@@ -161,11 +159,12 @@ async function refreshClickUpCache() {
             if (!res.data.tasks || res.data.tasks.length === 0) {
                 keepGoing = false;
             } else {
-                // 🟢 OPTIMIZATION: Extract ONLY what we need immediately
+                // 🟢 OPTIMIZATION: Extract name + links + TASK ID
                 const liteChunk = res.data.tasks.map(t => ({
-                    n: t.name.trim().toLowerCase(), // n = name
-                    i: t.custom_fields.find(f => f.id === FIELD_MAP.internal)?.value, // i = internal link
-                    m: t.custom_fields.find(f => f.id === FIELD_MAP.member)?.value // m = member link
+                    id: t.id, // <--- We now capture the ID to update the date later
+                    n: t.name.trim().toLowerCase(),
+                    i: t.custom_fields.find(f => f.id === FIELD_MAP.internal)?.value,
+                    m: t.custom_fields.find(f => f.id === FIELD_MAP.member)?.value
                 }));
 
                 allLiteTasks = allLiteTasks.concat(liteChunk);
@@ -182,9 +181,7 @@ async function refreshClickUpCache() {
 }
 
 function findFolderLinksInMemory(brandName) {
-    // 🟢 OPTIMIZATION: Look up using the 'n' (name) property
     const task = CLICKUP_CACHE.find(t => t.n === brandName.trim().toLowerCase());
-
     if (!task) return null;
 
     const extractId = (link) => {
@@ -194,8 +191,11 @@ function findFolderLinksInMemory(brandName) {
         return parts[parts.length - 1] || parts[parts.length - 2];
     };
 
-    // Use 'i' and 'm' properties
-    return { internalFolderId: extractId(task.i), memberFolderId: extractId(task.m) };
+    return { 
+        taskId: task.id, // Return Task ID so we can update it
+        internalFolderId: extractId(task.i), 
+        memberFolderId: extractId(task.m) 
+    };
 }
 
 // --- 5. THE DEBUG LOOP ---
@@ -203,16 +203,14 @@ async function checkZoomDebug() {
     try {
         console.log(`\n🕒 DEBUG SIMULATION (NO UPLOADS): ${new Date().toLocaleTimeString()}`);
 
-        // 1. CLICKUP FIRST (As requested)
         await refreshClickUpCache();
         
-        // 2. THEN ZOOM
         const token = await getZoomAccessToken();
         const today = new Date().toISOString().split('T')[0];
         console.log(` 🔎 Scanning ALL Recordings for TODAY: ${today}`);
 
         const usersRes = await axios.get('https://api.zoom.us/v2/users?page_size=300', {
-            headers: { 'Authorization': `Bearer ${token}` }
+            headers: { 'Authorization': `Bearer ${token}` } 
         });
         const users = usersRes.data.users || [];
         console.log(` 👥 Scanning ${users.length} users...`);
@@ -259,16 +257,28 @@ async function checkZoomDebug() {
                         continue;
                     }
 
-                    // SIMULATE UPLOAD
+                    // --- SIMULATE ACTIONS ---
+                    
+                    // 1. DATE FORMATTING (Updated for ALL videos)
+                    const niceDate = getFormattedDate(meeting.start_time);
+                    
+                    // 2. CLICKUP UPDATE SIMULATION (Only for Standard, Sales usually doesn't have ClickUp tasks)
+                    if (links.taskId && !isSalesEquation) {
+                        const dateUnix = new Date(meeting.start_time).getTime();
+                        console.log(` 🔄 [SIMULATION] Updating ClickUp 'Last 1:1' for Task ${links.taskId}`);
+                        console.log(`    ↳ New Value: ${niceDate} (Unix: ${dateUnix})`);
+                    }
+
                     for (const file of meeting.recording_files) {
                         if (file.file_type !== 'MP4' && file.file_type !== 'M4A') continue;
                         const fileExt = file.file_type === 'MP4' ? '.mp4' : '.m4a';
 
-                        let finalFileName = `${meeting.topic.replace(/[^a-zA-Z0-9]/g, '_')}${fileExt}`;
-                        if (isSalesEquation && file.file_type === 'MP4') {
-                            const niceDate = getFormattedDate(meeting.start_time);
-                            finalFileName = `${meeting.topic} - ${niceDate}${fileExt}`;
-                        }
+                        // 3. RENAMING LOGIC (Universal Date Addition)
+                        // Koby x Silky Tots -> Koby x Silky Tots - 22 December 2025.mp4
+                        let finalFileName = `${meeting.topic} - ${niceDate}${fileExt}`;
+                        
+                        // Sanitize filename just in case (remove slashes/colons)
+                        finalFileName = finalFileName.replace(/[:\/]/g, '');
 
                         let targetType = file.file_type === 'MP4' ? "Internal Link" : "Member Link";
                         let targetFolderId = file.file_type === 'MP4' ? links.internalFolderId : links.memberFolderId;
@@ -278,7 +288,6 @@ async function checkZoomDebug() {
                             targetType = "Internal Link (Travis Force)";
                         }
 
-                        // 🟢 FIX: GENERATE REAL LINKS
                         let displayLink = "";
                         if (isSalesEquation) {
                             displayLink = `${parentLink} (New Subfolder)`;
