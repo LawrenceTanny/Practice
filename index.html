@@ -573,32 +573,79 @@ const { google } = require('googleapis');
 const querystring = require('querystring');
 
 // --- 🛡️ CONFIGURATION ---
+const CHECK_INTERVAL_MINUTES = 15;
+const SCAN_MONTHS_BACK = 6; // Scans last 6 months
 const TOKEN_PATH = path.join(__dirname, 'zoom_token.json');
+const LOG_PATH = path.join(__dirname, 'completed_log.json');
 const CLICKUP_LAST_1_1_ID = "a1461481-3edc-4c68-b542-3f24b2386dec";
 const CLICKUP_CHECKIN_ID = "6d9e9972-38f7-4351-88b1-f109bd8a73c7";
 
-// 🎯 TARGET HOSTS (ONLY PROCESS THESE PEOPLE)
-const ALLOWED_HOSTS = [
-    "jw@jaywright.com.au",
-    "geneca@ecommerceequation.com.au"
+// 🛒 SALES EQUATION TEAM
+const SALES_TEAM_FOLDERS = {
+    "yoshi@ecommerceequation.com.au": "1i-1JcXYriROX05FJ1vq-Si9p885cYdnh",
+    "shant@ecommerceequation.com.au": "1HKQN41WjsOay2oQTPLeDlooZRi0jqRsf",
+    "jaket@ecommerceequation.com.au": "1UPVHx1DpeooUi6bnoKwNa0tPPXsWDV9M",
+    "seanb@ecommerceequation.com.au": "1PQ_Bm3wkVXYMHPSVhoOb1AoQFQ23JwHS"
+};
+
+// 🚫 BLACKLIST (Emails)
+const IGNORE_EMAILS = [
+    "jw@jaywright.com.au", "finance@ecommerceequation.com.au", "jake@ecommerceequation.com.au",
+    "kelsey@ecommerceequation.com.au", "lisa@ecommerceequation.com.au", "bel@ecommerceequation.com.au",
+    "emilie@ecommerceequation.com.au", "carlos@ecommerceequation.com.au", "jiah@ecommerceequation.com.au",
+    "arthur@ecommerceequation.com.au", "luiza@ecommerceequation.com.au", "geneca@ecommerceequation.com.au",
+    "andres@ecommerceequation.com.au", "will@ecommerceequation.com.au", "michelles@ecommerceequation.com.au",
+    "kimberley@ecommerceequation.com.au", "elizabeth@ecommerceequation.com.au", "ella@ecommerceequation.com.au",
+    "kieren@ecommerceequation.com.au", "paige@ecommerceequation.com.au", "thelab@ecommerceequation.com.au",
+    "kit@ecommerceequation.com.au", "ernie@ecommerceequation.com.au", "reece@ecommerceequation.com.au",
+    "zahrah@ecommerceequation.com.au", "esteban@ecommerceequation.com.au", "mia@ecommerceequation.com.au",
+    "admin@ecommerceequation.com.au", "norma@ecommerceequation.com.au", "edel@ecommerceequation.com.au",
+    "geralde@ecommerceequation.com.au", "linda@ecommerceequation.com.au", "madisongracewhite@gmail.com",
+    "noah@ecommerceequation.com.au", "hayden@ecommerceequation.com.au", "jeff@ecommerceequation.com.au",
+    "kingsley@ecommerceequation.com.au", "sooji@ecommerceequation.com.au", "brendan@ecommerceequation.com.au",
+    "benjamin@ecommerceequation.com.au", "dan@ecommerceequation.com.au", "michelle@ecommerceequation.com.au",
+    "kye@ecommerceequation.com.au", "jasmynn@ecommerceequation.com.au", "neil@ecommerceequation.com.au",
+    "nigel@ecommerceequation.com.au", "matt@ecommerceequation.com.au", "theodore@ecommerceequation.com.au",
+    "chantel@ecommerceequation.com.au", "kate@ecommerceequation.com.au", "ali@ecommerceequation.com.au",
+    "joss@ecommerceequation.com.au", "stevie@ecommerceequation.com.au", "johann@ecommerceequation.com.au",
+    "jen@ecommerceequation.com.au"
 ];
 
-// Global Cache
+const IGNORE_TOPICS = [
+    "Ecommerce Equation", "Ecommerce Equation Zoom", "Accelerate Call", "CUSTOMERS Zoom", "Boardroom"
+];
+
 let FIELD_MAP = { internal: null, member: null };
 let CLICKUP_CACHE = []; 
 
-// --- HELPER FUNCTIONS ---
 function getFormattedDate(dateString) {
     const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
     const d = new Date(dateString);
     return `${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()}`;
 }
 
+async function sendEmailNotification(status, videoName, brand, linkOrReason) {
+    if (!process.env.EMAIL_USER) return;
+    const oauth2Client = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, "http://localhost:3000/oauth2callback");
+    oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
+    const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+    
+    const subject = status === 'SUCCESS' ? `✅ Upload Success: ${videoName}` : `❌ Upload Failed: ${videoName}`;
+    const text = status === 'SUCCESS' ? `Video: ${videoName}\nBrand: ${brand}\n\nSuccessfully uploaded to Drive!\nView here: ${linkOrReason}` : `Video: ${videoName}\nBrand: ${brand}\n\nFailed to upload.\nReason: ${linkOrReason}`;
+    
+    const utf8Subject = `=?utf-8?B?${Buffer.from(subject).toString('base64')}?=`;
+    const messageParts = [`From: <${process.env.EMAIL_USER}>`, `To: <${process.env.EMAIL_USER}>`, `Subject: ${utf8Subject}`, `MIME-Version: 1.0`, `Content-Type: text/plain; charset=utf-8`, `Content-Transfer-Encoding: 7bit`, ``, text];
+    const message = messageParts.join('\n');
+    const encodedMessage = Buffer.from(message).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+    try { await gmail.users.messages.send({ userId: 'me', requestBody: { raw: encodedMessage } }); } catch (e) { console.error("   ❌ Failed to send email:", e.message); }
+}
+
 async function getZoomAccessToken() {
     if (!fs.existsSync(TOKEN_PATH)) throw new Error("❌ No Token Found!");
     let tokenData = JSON.parse(fs.readFileSync(TOKEN_PATH));
     if (Date.now() >= tokenData.expires_at) {
-        console.log('🔄 Refreshing Zoom Token...');
+        console.log('   🔄 Refreshing Zoom Token...');
         const credentials = Buffer.from(`${process.env.ZOOM_CLIENT_ID}:${process.env.ZOOM_CLIENT_SECRET}`).toString('base64');
         const res = await axios.post('https://zoom.us/oauth/token', querystring.stringify({ grant_type: 'refresh_token', refresh_token: tokenData.refresh_token }), { headers: { 'Authorization': `Basic ${credentials}`, 'Content-Type': 'application/x-www-form-urlencoded' } });
         tokenData = { access_token: res.data.access_token, refresh_token: res.data.refresh_token, expires_at: Date.now() + (res.data.expires_in * 1000) - 5000 };
@@ -616,7 +663,6 @@ async function deleteZoomRecording(meetingId, token) {
     } catch (e) { console.error(`      ⚠️ Failed to delete from Zoom: ${e.message}`); }
 }
 
-// --- CLICKUP UTILS ---
 async function refreshClickUpCache() {
     if (!process.env.CLICKUP_LIST_ID || !process.env.CLICKUP_API_KEY) return;
     if (!FIELD_MAP.internal) {
@@ -624,7 +670,7 @@ async function refreshClickUpCache() {
         FIELD_MAP.internal = res.data.fields.find(f => f.name === process.env.CLICKUP_INTERNAL_COL_NAME)?.id;
         FIELD_MAP.member = res.data.fields.find(f => f.name === process.env.CLICKUP_MEMBER_COL_NAME)?.id;
     }
-    console.log("📥 Downloading ClickUp Database (Lite Mode)...");
+    console.log("   📥 Downloading ClickUp Database (Lite Mode)...");
     let allLiteTasks = [], page = 0, keepGoing = true;
     while (keepGoing) {
         try {
@@ -632,12 +678,12 @@ async function refreshClickUpCache() {
             if (!res.data.tasks || res.data.tasks.length === 0) keepGoing = false;
             else {
                 allLiteTasks = allLiteTasks.concat(res.data.tasks.map(t => ({ id: t.id, n: t.name.trim().toLowerCase(), i: t.custom_fields.find(f => f.id === FIELD_MAP.internal)?.value, m: t.custom_fields.find(f => f.id === FIELD_MAP.member)?.value })));
-                process.stdout.write(`   Page ${page} loaded...\r`);
+                process.stdout.write(`      Page ${page} loaded...\r`);
                 page++;
             }
         } catch (e) { keepGoing = false; }
     }
-    console.log(`\n✅ ClickUp Cache Updated: ${allLiteTasks.length} Brands loaded.`);
+    console.log(`\n   ✅ ClickUp Cache Updated: ${allLiteTasks.length} Brands loaded.`);
     CLICKUP_CACHE = allLiteTasks;
 }
 
@@ -645,7 +691,7 @@ function findFolderLinksInMemory(brandName) {
     const task = CLICKUP_CACHE.find(t => t.n === brandName.trim().toLowerCase());
     if (!task) return null;
     
-    // 🛠️ ID CLEANER
+    // 🛠️ ID CLEANER (Removes ?usp=drive_link)
     const extractId = (link) => {
         if (!link) return null;
         let id = link;
@@ -661,177 +707,204 @@ function findFolderLinksInMemory(brandName) {
     return { taskId: task.id, internalFolderId: extractId(task.i), memberFolderId: extractId(task.m) };
 }
 
-// 🧠 SMART CLICKUP UPDATE (With Date Comparison)
+// 🧠 SMART CLICKUP UPDATE
 async function updateClickUpSmart(taskId, newDateUnix) {
     if (!taskId) return;
-    
     try {
-        // 1. Fetch Current Task Data
-        const res = await axios.get(`https://api.clickup.com/api/v2/task/${taskId}`, { 
-            headers: { 'Authorization': process.env.CLICKUP_API_KEY } 
-        });
-        
+        const res = await axios.get(`https://api.clickup.com/api/v2/task/${taskId}`, { headers: { 'Authorization': process.env.CLICKUP_API_KEY } });
         const customFields = res.data.custom_fields || [];
 
-        // Helper to check and update a specific field
         const checkAndUpdate = async (fieldId, fieldName) => {
             const field = customFields.find(f => f.id === fieldId);
             let currentDate = 0;
-            
-            // Get current date from ClickUp (it returns as string or null)
-            if (field && field.value) {
-                currentDate = parseInt(field.value); 
-            }
+            if (field && field.value) currentDate = parseInt(field.value); 
 
-            // LOGIC: Only update if New Date is NEWER than Current Date
             if (newDateUnix > currentDate) {
-                console.log(`      📅 updating '${fieldName}'... (New: ${newDateUnix} > Old: ${currentDate})`);
-                await axios.post(`https://api.clickup.com/api/v2/task/${taskId}/field/${fieldId}`, 
-                    { value: newDateUnix }, 
-                    { headers: { 'Authorization': process.env.CLICKUP_API_KEY, 'Content-Type': 'application/json' } }
-                );
-                console.log(`         ✅ Updated '${fieldName}'!`);
-            } else {
-                console.log(`      ⏭️ Skipping '${fieldName}' update. (Current date is newer or same).`);
+                console.log(`      📅 updating '${fieldName}'...`);
+                await axios.post(`https://api.clickup.com/api/v2/task/${taskId}/field/${fieldId}`, { value: newDateUnix }, { headers: { 'Authorization': process.env.CLICKUP_API_KEY, 'Content-Type': 'application/json' } });
             }
         };
 
-        // Run checks for both fields
-        await checkAndUpdate(CLICKUP_LAST_1_1_ID, "Last 1:1");
-        await checkAndUpdate(CLICKUP_CHECKIN_ID, "Check In");
+        // Update BOTH fields
+        if (CLICKUP_LAST_1_1_ID) await checkAndUpdate(CLICKUP_LAST_1_1_ID, "Last 1:1");
+        if (CLICKUP_CHECKIN_ID) await checkAndUpdate(CLICKUP_CHECKIN_ID, "Check In");
 
-    } catch (e) {
-        console.error(`      ⚠️ Failed to Smart Update ClickUp: ${e.message}`);
-    }
+    } catch (e) { console.error(`      ⚠️ Failed to Smart Update ClickUp: ${e.message}`); }
+}
+
+async function createDriveFolder(folderName, parentId) {
+    const oauth2Client = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, "http://localhost");
+    oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
+    const drive = google.drive({ version: 'v3', auth: oauth2Client });
+    const res = await drive.files.create({ resource: { name: folderName, mimeType: 'application/vnd.google-apps.folder', parents: [parentId] }, fields: 'id', supportsAllDrives: true });
+    return res.data.id;
 }
 
 async function uploadToDrive(filePath, fileName, folderId) {
     const oauth2Client = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, "http://localhost");
     oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
     const drive = google.drive({ version: 'v3', auth: oauth2Client });
-    const res = await drive.files.create({ 
-        resource: { name: fileName, parents: [folderId] }, 
-        media: { mimeType: 'video/mp4', body: fs.createReadStream(filePath) }, 
-        fields: 'id, webViewLink',
-        supportsAllDrives: true
-    });
+    const res = await drive.files.create({ resource: { name: fileName, parents: [folderId] }, media: { mimeType: 'video/mp4', body: fs.createReadStream(filePath) }, fields: 'id, webViewLink', supportsAllDrives: true });
     return res.data;
 }
 
-// --- MAIN TEST LOOP ---
-async function runTest() {
+// --- MAIN LOOP ---
+async function checkZoom() {
     try {
-        console.log(`\n🧪 STARTING BRAND WORKFLOW TEST: ${new Date().toLocaleTimeString()}`);
-        console.log(`   Targets: ${ALLOWED_HOSTS.join(', ')}`);
-        
+        console.log(`\n🕒 Watchman Scan: ${new Date().toLocaleTimeString()}`);
         await refreshClickUpCache();
         const token = await getZoomAccessToken();
-
-        // 🗓️ ONLY TODAY
-        const today = new Date().toISOString().split('T')[0];
-        console.log(`   🔎 Scanning Recordings for: ${today}`);
+        let completed = [];
+        // READ JSON SAFELY
+        if (fs.existsSync(LOG_PATH)) {
+            try { completed = JSON.parse(fs.readFileSync(LOG_PATH)); } catch (e) { completed = []; }
+        }
 
         const usersRes = await axios.get('https://api.zoom.us/v2/users?page_size=300', { headers: { 'Authorization': `Bearer ${token}` } });
         const users = usersRes.data.users || [];
 
         for (const user of users) {
-            // 🚨 FILTER: ONLY ALLOWED HOSTS
-            if (!ALLOWED_HOSTS.includes(user.email)) continue;
+            if (IGNORE_EMAILS.includes(user.email)) continue;
 
-            console.log(`   👤 Checking User: ${user.email}`);
+            // 📅 HISTORY LOOP: 6 MONTHS BACK
+            for (let i = 0; i < SCAN_MONTHS_BACK; i++) {
+                let toDate = new Date(); toDate.setMonth(toDate.getMonth() - i);
+                let fromDate = new Date(); fromDate.setMonth(fromDate.getMonth() - (i + 1));
+                const toStr = toDate.toISOString().split('T')[0];
+                const fromStr = fromDate.toISOString().split('T')[0];
 
-            try {
-                const res = await axios.get(`https://api.zoom.us/v2/users/${user.id}/recordings?from=${today}&to=${today}`, { headers: { 'Authorization': `Bearer ${token}` } });
-                if (!res.data.meetings || res.data.meetings.length === 0) {
-                    console.log(`      No recordings found for today.`);
-                    continue;
-                }
+                try {
+                    const res = await axios.get(`https://api.zoom.us/v2/users/${user.id}/recordings?from=${fromStr}&to=${toStr}`, { headers: { 'Authorization': `Bearer ${token}` } });
+                    if (!res.data.meetings) continue;
 
-                for (const meeting of res.data.meetings) {
-                    console.log(`\n   🎥 Processing: "${meeting.topic}"`);
+                    for (const meeting of res.data.meetings) {
+                        // 🔍 Check if UUID exists in the object array
+                        if (completed.some(item => item.uuid === meeting.uuid)) continue;
+                        
+                        let links = null;
+                        let brand = "";
+                        let isSalesEquation = false;
+                        let shouldSkipForever = false;
 
-                    // 1. BRAND LOOKUP
-                    const nameParts = meeting.topic.split(' x ');
-                    if (nameParts.length < 2) {
-                        console.log(`      ❌ Skipped: Name format incorrect (Missing ' x ')`);
-                        continue;
-                    }
-
-                    let brand = nameParts[1].split('-')[0].trim();
-                    if (nameParts[1].includes("Scale Session")) brand = nameParts[0].trim();
-                    console.log(`      🔍 Detected Brand: "${brand}"`);
-
-                    const links = findFolderLinksInMemory(brand);
-                    if (!links || !links.internalFolderId) {
-                        console.log(`      ❌ Brand not found in ClickUp!`);
-                        continue;
-                    }
-                    console.log(`      ✅ Found ClickUp Task! ID: ${links.taskId}`);
-
-                    // 2. FILE PROCESSING
-                    let allFilesSuccess = true;
-                    const niceDate = getFormattedDate(meeting.start_time);
-                    let updatedClickUp = false;
-
-                    for (const file of meeting.recording_files) {
-                        if (file.file_size && file.file_size < 1024) continue; 
-
-                        const fileExt = file.file_type === 'MP4' ? '.mp4' : (file.file_type === 'M4A' ? '.m4a' : `.${file.file_extension.toLowerCase()}`);
-                        let finalFileName = `${meeting.topic} - ${niceDate}${fileExt}`.replace(/[:\/]/g, '');
-                        const tempPath = path.join(__dirname, finalFileName);
-
-                        try {
-                            // Download
-                            const writer = fs.createWriteStream(tempPath);
-                            const streamRes = await axios({ url: `${file.download_url}?access_token=${token}`, method: 'GET', responseType: 'stream' });
-                            streamRes.data.pipe(writer);
-                            await new Promise((resolve, reject) => { writer.on('finish', resolve); writer.on('error', reject); });
-
-                            // Routing Logic
-                            let targetFolder = links.internalFolderId; // Default Internal
-                            let folderName = "Internal";
-
-                            if (file.file_type === 'MP4') {
-                                targetFolder = links.memberFolderId; // MP4 -> Member
-                                folderName = "Member";
+                        // 1. SALES LOGIC
+                        if (SALES_TEAM_FOLDERS[user.email]) {
+                            if (!meeting.topic.includes(' x ')) {
+                                shouldSkipForever = true; 
+                            } else {
+                                console.log(`   🚀 Found Sales Video: "${meeting.topic}" (${fromStr})`);
+                                const parentId = SALES_TEAM_FOLDERS[user.email];
+                                try {
+                                    const subFolderId = await createDriveFolder(meeting.topic, parentId);
+                                    links = { internalFolderId: subFolderId, memberFolderId: subFolderId };
+                                    isSalesEquation = true;
+                                    brand = "Sales Equation";
+                                } catch (e) {
+                                    console.error(`      ❌ Failed to create/find sales folder: ${e.message}`);
+                                    continue; 
+                                }
                             }
-                            
-                            console.log(`      📤 Uploading "${finalFileName}" to ${folderName} Folder...`);
-                            await uploadToDrive(tempPath, finalFileName, targetFolder);
-                            console.log(`         ✅ Upload Success!`);
+                        } 
+                        // 2. STANDARD LOGIC
+                        else {
+                            if (IGNORE_TOPICS.some(ignored => meeting.topic.includes(ignored))) {
+                                shouldSkipForever = true;
+                            } else {
+                                const nameParts = meeting.topic.split(' x ');
+                                if (nameParts.length < 2) {
+                                    shouldSkipForever = true; 
+                                } else {
+                                    brand = nameParts[1].split('-')[0].trim();
+                                    if (nameParts[1].includes("Scale Session")) brand = nameParts[0].trim();
+                                    console.log(`   🚀 Found Standard Video: "${meeting.topic}" (${fromStr})`);
+                                    links = findFolderLinksInMemory(brand);
+                                }
+                            }
+                        }
 
-                            // ClickUp Update (Smart Logic)
-                            if (file.file_type === 'MP4' && !updatedClickUp && links.taskId) {
-                                // Calls the NEW Smart Function
-                                await updateClickUpSmart(links.taskId, new Date(meeting.start_time).getTime());
-                                updatedClickUp = true;
+                        if (shouldSkipForever) {
+                            completed.push({ name: meeting.topic, uuid: meeting.uuid });
+                            fs.writeFileSync(LOG_PATH, JSON.stringify(completed, null, 2));
+                            continue;
+                        }
+
+                        if (!links || !links.internalFolderId) {
+                            console.log(`      ❌ Brand "${brand}" missing details.`);
+                            await sendEmailNotification('FAIL', meeting.topic, brand, "Brand not found in ClickUp.");
+                            continue;
+                        }
+
+                        console.log(`      ✅ Destination Found! Downloading files...`);
+
+                        let allFilesSuccess = true;
+                        const niceDate = getFormattedDate(meeting.start_time);
+                        let updatedClickUp = false;
+
+                        // 📂 FILE UPLOAD LOOP
+                        for (const file of meeting.recording_files) {
+                            if (file.file_size && file.file_size < 1024) continue; 
+
+                            const fileExt = file.file_type === 'MP4' ? '.mp4' : (file.file_type === 'M4A' ? '.m4a' : `.${file.file_extension.toLowerCase()}`);
+                            let finalFileName = `${meeting.topic} - ${niceDate}${fileExt}`.replace(/[:\/]/g, '');
+                            const tempPath = path.join(__dirname, finalFileName);
+
+                            try {
+                                const writer = fs.createWriteStream(tempPath);
+                                const streamRes = await axios({ url: `${file.download_url}?access_token=${token}`, method: 'GET', responseType: 'stream' });
+                                streamRes.data.pipe(writer);
+                                await new Promise((resolve, reject) => { writer.on('finish', resolve); writer.on('error', reject); });
+
+                                // 🔄 ROUTING
+                                let targetFolder = links.internalFolderId;
+                                if (!isSalesEquation) {
+                                    if (file.file_type === 'MP4') targetFolder = links.memberFolderId; // MP4 -> Member
+                                    else targetFolder = links.internalFolderId; // Others -> Internal
+                                    
+                                    if (user.email === 'travis@ecommerceequation.com.au') targetFolder = links.internalFolderId;
+                                } else {
+                                    targetFolder = links.internalFolderId; // Sales = All in one
+                                }
+
+                                console.log(`      📤 Uploading "${finalFileName}" (${file.file_type})...`);
+                                await uploadToDrive(tempPath, finalFileName, targetFolder);
+                                
+                                if (file.file_type === 'MP4') {
+                                        await sendEmailNotification('SUCCESS', finalFileName, brand, "Uploaded to Drive");
+                                        if (!isSalesEquation && links.taskId && !updatedClickUp) {
+                                            // SMART UPDATE HERE 🧠
+                                            await updateClickUpSmart(links.taskId, new Date(meeting.start_time).getTime());
+                                            updatedClickUp = true;
+                                        }
+                                }
+                            } catch (err) {
+                                console.error(`      ❌ Error Uploading: ${err.message}`);
+                                allFilesSuccess = false;
+                            } finally {
+                                if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); 
+                            }
+                        }
+
+                        if (allFilesSuccess) {
+                            if (!isSalesEquation) {
+                                console.log(`      🗑️ Deleting Standard Recording from Zoom...`);
+                                await deleteZoomRecording(meeting.uuid, token);
+                            } else {
+                                console.log(`      🛡️ Keeping Sales Recording on Zoom (Safety Protocol).`);
                             }
 
-                        } catch (err) {
-                            console.error(`      ❌ Upload Failed: ${err.message}`);
-                            allFilesSuccess = false;
-                        } finally {
-                            if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); 
+                            completed.push({ name: meeting.topic, uuid: meeting.uuid });
+                            fs.writeFileSync(LOG_PATH, JSON.stringify(completed, null, 2));
+                        } else {
+                            console.log("      ⚠️ Upload had errors. Zoom file NOT deleted. Will retry.");
                         }
                     }
-
-                    // 3. DELETION
-                    if (allFilesSuccess) {
-                        await deleteZoomRecording(meeting.uuid, token);
-                    } else {
-                        console.log("      ⚠️ Upload errors occurred. Zoom video NOT deleted.");
-                    }
-                }
-            } catch (err) { 
-                console.error(`   ❌ Error: ${err.message}`);
+                } catch (err) {}
             }
         }
-        console.log("\n🏁 TEST COMPLETE.");
-
-    } catch (error) { console.error("❌ Fatal Error:", error.message); }
+    } catch (error) { console.error("❌ Watchman Error:", error.message); }
 }
 
-runTest();
+checkZoom();
+setInterval(checkZoom, CHECK_INTERVAL_MINUTES * 60 * 1000);
 </pre></code>
 </body>
 </html>
