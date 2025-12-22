@@ -19,7 +19,7 @@
   <h1>Final</h1>
 <h1><strong>server.js</strong></h1>
 <code><pre>
- require('dotenv').config();
+require('dotenv').config();
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
@@ -63,7 +63,6 @@ const IGNORE_EMAILS = [
     "jen@ecommerceequation.com.au"
 ];
 
-// 🚫 IGNORE TOPICS
 const IGNORE_TOPICS = [
     "Ecommerce Equation", "Ecommerce Equation Zoom", "Accelerate Call", "CUSTOMERS Zoom", "Boardroom"
 ];
@@ -148,18 +147,29 @@ async function updateClickUpLast1on1(taskId, dateUnix) {
 }
 
 async function createDriveFolder(folderName, parentId) {
-    const oauth2Client = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, "http://localhost:3000/oauth2callback");
+    const oauth2Client = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, "http://localhost");
     oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
     const drive = google.drive({ version: 'v3', auth: oauth2Client });
-    const res = await drive.files.create({ resource: { name: folderName, mimeType: 'application/vnd.google-apps.folder', parents: [parentId] }, fields: 'id' });
+    // ⚠️ FIXED: Added supportsAllDrives for Shared Drive Access
+    const res = await drive.files.create({ 
+        resource: { name: folderName, mimeType: 'application/vnd.google-apps.folder', parents: [parentId] }, 
+        fields: 'id',
+        supportsAllDrives: true 
+    });
     return res.data.id;
 }
 
 async function uploadToDrive(filePath, fileName, folderId) {
-    const oauth2Client = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, "http://localhost:3000/oauth2callback");
+    const oauth2Client = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, "http://localhost");
     oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
     const drive = google.drive({ version: 'v3', auth: oauth2Client });
-    const res = await drive.files.create({ resource: { name: fileName, parents: [folderId] }, media: { mimeType: 'video/mp4', body: fs.createReadStream(filePath) }, fields: 'id, webViewLink' });
+    // ⚠️ FIXED: Added supportsAllDrives
+    const res = await drive.files.create({ 
+        resource: { name: fileName, parents: [folderId] }, 
+        media: { mimeType: 'video/mp4', body: fs.createReadStream(filePath) }, 
+        fields: 'id, webViewLink',
+        supportsAllDrives: true
+    });
     return res.data;
 }
 
@@ -201,6 +211,7 @@ async function checkZoom() {
                             console.log(`      ↳ Creating Subfolder in Drive...`);
                             
                             const parentId = SALES_TEAM_FOLDERS[user.email];
+                            // If this fails, we catch error below and Retry next loop
                             const subFolderId = await createDriveFolder(meeting.topic, parentId);
                             console.log(`      ✅ [STEP 2] Folder Created! ID: ${subFolderId}`);
                             
@@ -288,7 +299,6 @@ async function checkZoom() {
                     }
                 }
             } catch (err) { 
-                // 🛑 CRITICAL FIX: PRINT THE ERROR
                 console.error(`   ❌ Critical Error for User ${user.email}: ${err.message}`);
                 if (err.response) console.error(err.response.data);
             }
@@ -300,7 +310,51 @@ checkZoom();
 setInterval(checkZoom, CHECK_INTERVAL_MINUTES * 60 * 1000);
 </pre></code>
 
+<h1><strong>get token.js</strong></h1>
+<code><pre>
+    const { google } = require('googleapis');
+const http = require('http');
+const url = require('url');
+require('dotenv').config();
 
+const oauth2Client = new google.auth.OAuth2(
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET,
+    "http://localhost:3000/oauth2callback"
+);
+
+// 🚨 UPDATED SCOPE: NOW 'drive' INSTEAD OF 'drive.file'
+const scopes = [
+    'https://www.googleapis.com/auth/drive',      // <--- Full Access to see Yoshi's folder
+    'https://www.googleapis.com/auth/gmail.send'
+];
+
+const server = http.createServer(async (req, res) => {
+    if (req.url.startsWith('/oauth2callback')) {
+        const qs = new url.URL(req.url, 'http://localhost:3000').searchParams;
+        const code = qs.get('code');
+        const { tokens } = await oauth2Client.getToken(code);
+        
+        console.log('\n✨ NEW SUPER TOKEN (Copy to .env):');
+        console.log('------------------------------------------------');
+        console.log(tokens.refresh_token); 
+        console.log('------------------------------------------------\n');
+        
+        res.end('Success! You have the Master Token. Check terminal.');
+        server.close();
+        process.exit(0);
+    }
+});
+
+server.listen(3000, () => {
+    const authUrl = oauth2Client.generateAuthUrl({
+        access_type: 'offline',
+        scope: scopes,
+        prompt: 'consent'
+    });
+    console.log(`\n🔗 CLICK THIS LINK: ${authUrl}\n`);
+});
+</pre></code>
 
 </body>
 </html>
