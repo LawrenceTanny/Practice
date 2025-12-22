@@ -575,6 +575,7 @@ const querystring = require('querystring');
 // --- 🛡️ CONFIGURATION ---
 const TOKEN_PATH = path.join(__dirname, 'zoom_token.json');
 const CLICKUP_LAST_1_1_ID = "a1461481-3edc-4c68-b542-3f24b2386dec";
+const CLICKUP_CHECKIN_ID = "6d9e9972-38f7-4351-88b1-f109bd8a73c7";
 
 // 🎯 TARGET HOSTS (ONLY PROCESS THESE PEOPLE)
 const ALLOWED_HOSTS = [
@@ -644,7 +645,7 @@ function findFolderLinksInMemory(brandName) {
     const task = CLICKUP_CACHE.find(t => t.n === brandName.trim().toLowerCase());
     if (!task) return null;
     
-    // 🛠️ FIXED: ID CLEANER
+    // 🛠️ ID CLEANER
     const extractId = (link) => {
         if (!link) return null;
         let id = link;
@@ -654,20 +655,53 @@ function findFolderLinksInMemory(brandName) {
             const parts = link.split('/');
             id = parts[parts.length - 1] || parts[parts.length - 2];
         }
-        // ✨ THE FIX: Remove query params like ?usp=drive_link
         return id.split('?')[0].trim();
     };
 
     return { taskId: task.id, internalFolderId: extractId(task.i), memberFolderId: extractId(task.m) };
 }
 
-async function updateClickUpLast1on1(taskId, dateUnix) {
-    if (!taskId || !CLICKUP_LAST_1_1_ID) return;
-    try { 
-        await axios.post(`https://api.clickup.com/api/v2/task/${taskId}/field/${CLICKUP_LAST_1_1_ID}`, { value: dateUnix }, { headers: { 'Authorization': process.env.CLICKUP_API_KEY, 'Content-Type': 'application/json' } }); 
-        console.log(`      📅 ClickUp 'Last 1:1' updated successfully!`); 
-    } catch (e) { 
-        console.error(`      ⚠️ Failed to update ClickUp Date: ${e.message}`); 
+// 🧠 SMART CLICKUP UPDATE (With Date Comparison)
+async function updateClickUpSmart(taskId, newDateUnix) {
+    if (!taskId) return;
+    
+    try {
+        // 1. Fetch Current Task Data
+        const res = await axios.get(`https://api.clickup.com/api/v2/task/${taskId}`, { 
+            headers: { 'Authorization': process.env.CLICKUP_API_KEY } 
+        });
+        
+        const customFields = res.data.custom_fields || [];
+
+        // Helper to check and update a specific field
+        const checkAndUpdate = async (fieldId, fieldName) => {
+            const field = customFields.find(f => f.id === fieldId);
+            let currentDate = 0;
+            
+            // Get current date from ClickUp (it returns as string or null)
+            if (field && field.value) {
+                currentDate = parseInt(field.value); 
+            }
+
+            // LOGIC: Only update if New Date is NEWER than Current Date
+            if (newDateUnix > currentDate) {
+                console.log(`      📅 updating '${fieldName}'... (New: ${newDateUnix} > Old: ${currentDate})`);
+                await axios.post(`https://api.clickup.com/api/v2/task/${taskId}/field/${fieldId}`, 
+                    { value: newDateUnix }, 
+                    { headers: { 'Authorization': process.env.CLICKUP_API_KEY, 'Content-Type': 'application/json' } }
+                );
+                console.log(`         ✅ Updated '${fieldName}'!`);
+            } else {
+                console.log(`      ⏭️ Skipping '${fieldName}' update. (Current date is newer or same).`);
+            }
+        };
+
+        // Run checks for both fields
+        await checkAndUpdate(CLICKUP_LAST_1_1_ID, "Last 1:1");
+        await checkAndUpdate(CLICKUP_CHECKIN_ID, "Check In");
+
+    } catch (e) {
+        console.error(`      ⚠️ Failed to Smart Update ClickUp: ${e.message}`);
     }
 }
 
@@ -766,9 +800,10 @@ async function runTest() {
                             await uploadToDrive(tempPath, finalFileName, targetFolder);
                             console.log(`         ✅ Upload Success!`);
 
-                            // ClickUp Update (Once per meeting)
+                            // ClickUp Update (Smart Logic)
                             if (file.file_type === 'MP4' && !updatedClickUp && links.taskId) {
-                                await updateClickUpLast1on1(links.taskId, new Date(meeting.start_time).getTime());
+                                // Calls the NEW Smart Function
+                                await updateClickUpSmart(links.taskId, new Date(meeting.start_time).getTime());
                                 updatedClickUp = true;
                             }
 
