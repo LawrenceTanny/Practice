@@ -421,7 +421,7 @@ const { google } = require('googleapis');
 const querystring = require('querystring');
 
 // --- CONFIGURATION ---
-const SCAN_MONTHS_BACK = 48; // 4 Years back (Start of Company)
+const SCAN_MONTHS_BACK = 48; // 4 Years back
 const TOKEN_PATH = path.join(__dirname, 'zoom_token.json');
 const LOG_PATH = path.join(__dirname, 'completed_log.json');
 const REPORT_PATH = path.join(__dirname, 'missing_report.txt');
@@ -459,7 +459,7 @@ const IGNORE_EMAILS = [
 
 let FIELD_MAP = { internal: null, member: null };
 let CLICKUP_CACHE = [];
-let missingList = []; // Stores names of missing videos
+let missingList = [];
 
 // --- HELPERS ---
 async function getZoomAccessToken() {
@@ -475,12 +475,11 @@ async function getZoomAccessToken() {
     return tokenData.access_token;
 }
 
-// 🏷️ RENAME ZOOM MEETING (Add ✅) - FIXED FOR 404/400 ERRORS
+// 🏷️ RENAME ZOOM MEETING
 async function markZoomComplete(meetingId, currentTopic, token) {
     if (currentTopic.includes('✅')) return true; 
 
     try {
-        // 🔒 DOUBLE ENCODE: Fixes 404 errors for IDs starting with "/"
         const safeId = encodeURIComponent(encodeURIComponent(meetingId));
         const newTopic = `${currentTopic} ✅`;
         
@@ -490,11 +489,6 @@ async function markZoomComplete(meetingId, currentTopic, token) {
         );
         return true;
     } catch (e) {
-        // Suppress errors for Locked (400) or Not Found (404) meetings
-        const status = e.response ? e.response.status : 0;
-        if (status !== 400 && status !== 404) {
-            console.error(`      ⚠️ Could not rename Zoom: ${e.message}`);
-        }
         return false;
     }
 }
@@ -543,18 +537,15 @@ async function checkDriveExistence(isSales, topic, parentId) {
 
     try {
         let query = "";
-        
         let cleanTopic = topic;
         if (topic.includes("Scale Session")) cleanTopic = topic.replace("Scale Session", "").trim();
         const parts = cleanTopic.split(' x ');
         
         if (isSales) {
-            // SALES: Relaxed Name Check
             const safeName = topic.replace(/'/g, "\\'");
             query = `mimeType = 'application/vnd.google-apps.folder' and '${parentId}' in parents and name contains '${safeName}' and trashed = false`;
         } 
         else if (parts.length >= 2) {
-            // STANDARD: Fuzzy Search
             const part1 = parts[0].trim().replace(/'/g, "\\'");
             const part2 = parts[1].trim().replace(/'/g, "\\'");
             query = `'${parentId}' in parents and name contains '${part1}' and name contains '${part2}' and trashed = false`;
@@ -595,10 +586,10 @@ async function syncHistory() {
 
         let counter = 0;
         let foundCount = 0;
+        let alreadyMarkedCount = 0;
         let ignoredCount = 0;
 
         for (const user of users) {
-            // 4 YEAR SCAN
             for (let i = 0; i < SCAN_MONTHS_BACK; i++) {
                 let toDate = new Date(); toDate.setMonth(toDate.getMonth() - i);
                 let fromDate = new Date(); fromDate.setMonth(fromDate.getMonth() - (i + 1));
@@ -612,14 +603,22 @@ async function syncHistory() {
                     for (const meeting of res.data.meetings) {
                         if (completed.some(item => item.uuid === meeting.uuid)) continue;
 
-                        counter++; // Global counter
+                        counter++;
+
+                        // 🔍 SMART CHECK: Is it already marked on Zoom?
+                        if (meeting.topic.includes('✅')) {
+                            completed.push({ name: meeting.topic, uuid: meeting.uuid });
+                            alreadyMarkedCount++;
+                            fs.writeFileSync(LOG_PATH, JSON.stringify(completed, null, 2));
+                            console.log(`${counter}) ⏩ Already Marked (✅): "${meeting.topic}"`);
+                            continue; // Skip the rest, it's done.
+                        }
 
                         // 1. AUTO-IGNORE (Email)
                         if (IGNORE_EMAILS.includes(user.email)) {
                             completed.push({ name: meeting.topic, uuid: meeting.uuid });
                             ignoredCount++;
                             fs.writeFileSync(LOG_PATH, JSON.stringify(completed, null, 2));
-                            // Skip the rest for ignored emails
                             continue;
                         }
 
@@ -657,10 +656,9 @@ async function syncHistory() {
                         const exists = await checkDriveExistence(isSales, meeting.topic, targetFolderId);
 
                         if (exists) {
-                            // MARK JSON
                             completed.push({ name: meeting.topic, uuid: meeting.uuid });
                             
-                            // RENAME ZOOM (VISUAL CHECK)
+                            // RENAME ZOOM
                             await markZoomComplete(meeting.uuid, meeting.topic, token);
                             
                             foundCount++;
@@ -681,11 +679,11 @@ async function syncHistory() {
         console.log("🏁 HISTORY SYNC REPORT");
         console.log("===========================================");
         console.log(`   🔢 Total Scanned: ${counter}`);
+        console.log(`   ⏩ Already Marked: ${alreadyMarkedCount}`);
         console.log(`   🚫 Auto-Ignored: ${ignoredCount}`);
-        console.log(`   ✅ Confirmed & Renamed: ${foundCount}`);
+        console.log(`   ✅ Newly Renamed: ${foundCount}`);
         console.log(`   ❌ Missing / Issues: ${missingList.length}`);
         
-        // Write Report File
         const reportContent = `MISSING VIDEOS REPORT (${new Date().toLocaleString()})\n\n` + missingList.join('\n');
         fs.writeFileSync(REPORT_PATH, reportContent);
         console.log(`\n📄 Report saved to: missing_report.txt`);
