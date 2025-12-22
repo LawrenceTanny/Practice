@@ -70,11 +70,9 @@ const IGNORE_TOPICS = [
     "Ecommerce Equation", "Ecommerce Equation Zoom", "Accelerate Call", "CUSTOMERS Zoom", "Boardroom"
 ];
 
-// Global Cache
 let FIELD_MAP = { internal: null, member: null };
 let CLICKUP_CACHE = []; 
 
-// --- HELPER FUNCTIONS ---
 function getFormattedDate(dateString) {
     const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
     const d = new Date(dateString);
@@ -111,37 +109,43 @@ async function getZoomAccessToken() {
     return tokenData.access_token;
 }
 
-// 🏷️ RENAME ZOOM MEETING (Add ✅)
+// 🏷️ RENAME ZOOM MEETING (FIXED: Double Encoding + Error Handling)
 async function markZoomComplete(meetingId, currentTopic, token) {
-    // Only rename if it doesn't already have the checkmark
     if (currentTopic.includes('✅')) return;
 
     try {
-        const safeId = encodeURIComponent(meetingId);
+        // 🔒 DOUBLE ENCODE: Prevents 404 on IDs starting with "/"
+        const safeId = encodeURIComponent(encodeURIComponent(meetingId));
         const newTopic = `${currentTopic} ✅`;
         
         await axios.patch(`https://api.zoom.us/v2/meetings/${safeId}`, 
             { topic: newTopic },
             { headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' } }
         );
-        console.log(`      ✨ Marked Zoom Meeting as Complete (Added ✅)`);
+        console.log(`      ✨ Renamed Zoom Meeting: "${newTopic}"`);
     } catch (e) {
-        // Don't crash if rename fails (permissions etc)
-        console.error(`      ⚠️ Could not rename Zoom meeting: ${e.response ? e.response.status : e.message} (Check 'meeting:write' scope)`);
+        // Suppress expected errors (400 = Locked/Old, 404 = Not Found)
+        const status = e.response ? e.response.status : 0;
+        if (status !== 400 && status !== 404) {
+            console.error(`      ⚠️ Could not rename Zoom: ${e.message}`);
+        }
     }
 }
 
-// 🛑 DELETE FROM ZOOM (FIXED URL ENCODING)
+// 🛑 DELETE FROM ZOOM (FIXED: Double Encoding)
 async function deleteZoomRecording(meetingId, token) {
     try {
         console.log(`      🗑️ Deleting Recording from Zoom (UUID: ${meetingId})...`);
-        const safeId = encodeURIComponent(meetingId); // Fixes the double slash bug
+        
+        // 🔒 DOUBLE ENCODE: Safer for Delete operations too
+        const safeId = encodeURIComponent(encodeURIComponent(meetingId)); 
+        
         await axios.delete(`https://api.zoom.us/v2/meetings/${safeId}/recordings`, { headers: { 'Authorization': `Bearer ${token}` } });
         console.log(`      ✅ Deleted from Zoom Cloud.`);
-        return true; // Success
+        return true; 
     } catch (e) { 
         console.error(`      ⚠️ Failed to delete from Zoom: ${e.message}`); 
-        return false; // Failed
+        return false; 
     }
 }
 
@@ -235,6 +239,7 @@ async function checkZoom() {
         console.log(`\n🕒 Watchman Scan: ${new Date().toLocaleTimeString()}`);
         const token = await getZoomAccessToken();
         let completed = [];
+        // READ JSON SAFELY
         if (fs.existsSync(LOG_PATH)) {
             try { completed = JSON.parse(fs.readFileSync(LOG_PATH)); } catch (e) { completed = []; }
         }
@@ -397,12 +402,12 @@ async function checkZoom() {
     } catch (error) { console.error("❌ Watchman Error:", error.message); }
 }
 
-// 🚀 INITIALIZATION: LOAD CLICKUP ONCE, THEN LOOP
+// 🚀 INITIALIZATION
 (async () => {
     console.log("🚀 Starting Server...");
-    await refreshClickUpCache(); // Load ONCE
-    checkZoom(); // Run first check immediately
-    setInterval(checkZoom, CHECK_INTERVAL_MINUTES * 60 * 1000); // Loop
+    await refreshClickUpCache(); 
+    checkZoom(); 
+    setInterval(checkZoom, CHECK_INTERVAL_MINUTES * 60 * 1000); 
 })();
 </pre></code>
 
@@ -470,22 +475,26 @@ async function getZoomAccessToken() {
     return tokenData.access_token;
 }
 
-// 🏷️ RENAME ZOOM MEETING (Add ✅)
+// 🏷️ RENAME ZOOM MEETING (Add ✅) - FIXED FOR 404/400 ERRORS
 async function markZoomComplete(meetingId, currentTopic, token) {
-    if (currentTopic.includes('✅')) return; 
+    if (currentTopic.includes('✅')) return true; 
 
     try {
-        const safeId = encodeURIComponent(meetingId);
+        // 🔒 DOUBLE ENCODE: Fixes 404 errors for IDs starting with "/"
+        const safeId = encodeURIComponent(encodeURIComponent(meetingId));
         const newTopic = `${currentTopic} ✅`;
         
         await axios.patch(`https://api.zoom.us/v2/meetings/${safeId}`, 
             { topic: newTopic },
             { headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' } }
         );
-        // Returns true if renamed
         return true;
     } catch (e) {
-        console.error(`      ⚠️ Could not rename Zoom: ${e.message}`);
+        // Suppress errors for Locked (400) or Not Found (404) meetings
+        const status = e.response ? e.response.status : 0;
+        if (status !== 400 && status !== 404) {
+            console.error(`      ⚠️ Could not rename Zoom: ${e.message}`);
+        }
         return false;
     }
 }
@@ -603,14 +612,14 @@ async function syncHistory() {
                     for (const meeting of res.data.meetings) {
                         if (completed.some(item => item.uuid === meeting.uuid)) continue;
 
-                        counter++; // Global counter for all scanned videos
+                        counter++; // Global counter
 
                         // 1. AUTO-IGNORE (Email)
                         if (IGNORE_EMAILS.includes(user.email)) {
                             completed.push({ name: meeting.topic, uuid: meeting.uuid });
                             ignoredCount++;
                             fs.writeFileSync(LOG_PATH, JSON.stringify(completed, null, 2));
-                            // console.log(`${counter}) 🚫 Ignored: ${meeting.topic}`);
+                            // Skip the rest for ignored emails
                             continue;
                         }
 
