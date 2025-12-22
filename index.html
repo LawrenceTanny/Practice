@@ -62,11 +62,9 @@ const IGNORE_EMAILS = [
     "jen@ecommerceequation.com.au"
 ];
 
-// Cache
 let FIELD_MAP = { internal: null, member: null };
 let CLICKUP_CACHE = [];
 
-// --- HELPERS ---
 async function getZoomAccessToken() {
     if (!fs.existsSync(TOKEN_PATH)) throw new Error("❌ No Token Found!");
     let tokenData = JSON.parse(fs.readFileSync(TOKEN_PATH));
@@ -80,28 +78,21 @@ async function getZoomAccessToken() {
     return tokenData.access_token;
 }
 
-// CLICKUP CACHE
 async function refreshClickUpCache() {
     if (!process.env.CLICKUP_LIST_ID || !process.env.CLICKUP_API_KEY) return;
     console.log("📥 Loading ClickUp Database...");
-    
     if (!FIELD_MAP.internal) {
         const res = await axios.get(`https://api.clickup.com/api/v2/list/${process.env.CLICKUP_LIST_ID}/field`, { headers: { 'Authorization': process.env.CLICKUP_API_KEY } });
         FIELD_MAP.internal = res.data.fields.find(f => f.name === process.env.CLICKUP_INTERNAL_COL_NAME)?.id;
         FIELD_MAP.member = res.data.fields.find(f => f.name === process.env.CLICKUP_MEMBER_COL_NAME)?.id;
     }
-
-    let page = 0;
-    let keepGoing = true;
+    let page = 0, keepGoing = true;
     while (keepGoing) {
         try {
             const res = await axios.get(`https://api.clickup.com/api/v2/list/${process.env.CLICKUP_LIST_ID}/task?include_closed=true&subtasks=true&page=${page}`, { headers: { 'Authorization': process.env.CLICKUP_API_KEY } });
             if (!res.data.tasks || res.data.tasks.length === 0) keepGoing = false;
             else {
-                CLICKUP_CACHE = CLICKUP_CACHE.concat(res.data.tasks.map(t => ({ 
-                    n: t.name.trim().toLowerCase(), 
-                    m: t.custom_fields.find(f => f.id === FIELD_MAP.member)?.value 
-                })));
+                CLICKUP_CACHE = CLICKUP_CACHE.concat(res.data.tasks.map(t => ({ n: t.name.trim().toLowerCase(), m: t.custom_fields.find(f => f.id === FIELD_MAP.member)?.value })));
                 process.stdout.write(`   Page ${page} loaded...\r`);
                 page++;
             }
@@ -118,7 +109,6 @@ function getMemberFolderId(brandName) {
     return parts[parts.length - 1] || parts[parts.length - 2];
 }
 
-// GOOGLE DRIVE CHECKER
 async function checkDriveExistence(isSales, topic, parentId) {
     const oauth2Client = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, "http://localhost");
     oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
@@ -126,11 +116,29 @@ async function checkDriveExistence(isSales, topic, parentId) {
 
     try {
         let query = "";
-        const safeName = topic.replace(/'/g, "\\'");
-
+        
+        // 1. CLEAN UP THE TOPIC
+        let cleanTopic = topic;
+        if (topic.includes("Scale Session")) cleanTopic = topic.replace("Scale Session", "").trim();
+        
+        // 2. SPLIT "Name x Brand" into "Name" and "Brand"
+        const parts = cleanTopic.split(' x ');
+        
         if (isSales) {
+            // SALES: Search for Folder with exact name (contains handles the rest)
+            const safeName = topic.replace(/'/g, "\\'");
             query = `mimeType = 'application/vnd.google-apps.folder' and '${parentId}' in parents and name contains '${safeName}' and trashed = false`;
-        } else {
+        } 
+        else if (parts.length >= 2) {
+            // STANDARD: SEARCH FOR BOTH PARTS (Handles Dates & Reversed Names)
+            const part1 = parts[0].trim().replace(/'/g, "\\'");
+            const part2 = parts[1].trim().replace(/'/g, "\\'");
+            // Query: Name contains 'Part1' AND Name contains 'Part2'
+            query = `'${parentId}' in parents and name contains '${part1}' and name contains '${part2}' and trashed = false`;
+        } 
+        else {
+            // Fallback for weird names
+            const safeName = topic.replace(/'/g, "\\'");
             query = `'${parentId}' in parents and name contains '${safeName}' and trashed = false`;
         }
 
@@ -148,20 +156,17 @@ async function checkDriveExistence(isSales, topic, parentId) {
     }
 }
 
-// --- MAIN SCRIPT ---
 async function syncHistory() {
     try {
-        console.log("🕵️ STARTING DRIVE SYNC CHECKER...");
+        console.log("🕵️ STARTING SMART SYNC CHECKER...");
+        console.log("   (Uses Split-Search to find 'Name x Brand - Date')");
         
         await refreshClickUpCache();
         const token = await getZoomAccessToken();
         
         let completed = [];
-        // READ JSON SAFELY
         if (fs.existsSync(LOG_PATH)) {
-            try {
-                completed = JSON.parse(fs.readFileSync(LOG_PATH));
-            } catch (e) { completed = []; }
+            try { completed = JSON.parse(fs.readFileSync(LOG_PATH)); } catch (e) { completed = []; }
         }
 
         const usersRes = await axios.get('https://api.zoom.us/v2/users?page_size=300', { headers: { 'Authorization': `Bearer ${token}` } });
@@ -183,12 +188,10 @@ async function syncHistory() {
                     if (!res.data.meetings) continue;
 
                     for (const meeting of res.data.meetings) {
-                        // 🔍 UPDATED: Check if UUID exists in the object array
                         if (completed.some(item => item.uuid === meeting.uuid)) continue;
 
                         // 1. AUTO-IGNORE (Email)
                         if (IGNORE_EMAILS.includes(user.email)) {
-                            // PUSH OBJECT { name, uuid }
                             completed.push({ name: meeting.topic, uuid: meeting.uuid });
                             ignoredCount++;
                             fs.writeFileSync(LOG_PATH, JSON.stringify(completed, null, 2));
@@ -208,18 +211,23 @@ async function syncHistory() {
                             let brand = nameParts[1].split('-')[0].trim();
                             if (nameParts[1].includes("Scale Session")) brand = nameParts[0].trim();
                             
+                            // Try normal, then try reversed if normal fails to find brand
                             targetFolderId = getMemberFolderId(brand);
+                            if (!targetFolderId) {
+                                // Try reversed: Brand x Name
+                                let reverseBrand = nameParts[0].trim();
+                                targetFolderId = getMemberFolderId(reverseBrand);
+                            }
                         }
 
                         if (!targetFolderId) continue;
 
-                        // 3. CHECK DRIVE
+                        // 3. CHECK DRIVE (SMART SEARCH)
                         process.stdout.write(`🔍 Checking Drive: "${meeting.topic}"... `);
                         const exists = await checkDriveExistence(isSales, meeting.topic, targetFolderId);
 
                         if (exists) {
                             console.log("✅ FOUND! Marking Complete.");
-                            // PUSH OBJECT { name, uuid }
                             completed.push({ name: meeting.topic, uuid: meeting.uuid });
                             foundCount++;
                         } else {
