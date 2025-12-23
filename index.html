@@ -98,7 +98,6 @@ async function markZoomComplete(meetingId, currentTopic, token) {
         );
     } catch (e) {
         if (e.response && e.response.status === 404) {
-             // Try Double Encode
              try {
                 const doubleId = encodeURIComponent(encodeURIComponent(meetingId));
                 await axios.patch(`https://api.zoom.us/v2/meetings/${doubleId}`, { topic: `${currentTopic} ✅` }, { headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' } });
@@ -138,7 +137,7 @@ function getMemberFolderId(brandName) {
     return parts[parts.length - 1] || parts[parts.length - 2];
 }
 
-// 🧠 NEW SMART CHECK: Requires Date Matching
+// 🧠 SMART CHECK: Requires Date Matching
 async function checkDriveExistence(isSales, topic, parentId, meetingDateStr) {
     const oauth2Client = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, "http://localhost");
     oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
@@ -146,13 +145,10 @@ async function checkDriveExistence(isSales, topic, parentId, meetingDateStr) {
 
     try {
         let query = "";
-        
         let cleanTopic = topic;
         if (topic.includes("Scale Session")) cleanTopic = topic.replace("Scale Session", "").trim();
         const parts = cleanTopic.split(' x ');
         
-        // 🔒 CORE QUERY: Must contain Date String (e.g., "25 December 2025")
-        // We look for name contains 'Topic' AND name contains 'Date'
         const safeDate = meetingDateStr.replace(/'/g, "\\'");
 
         if (isSales) {
@@ -162,7 +158,6 @@ async function checkDriveExistence(isSales, topic, parentId, meetingDateStr) {
         else if (parts.length >= 2) {
             const part1 = parts[0].trim().replace(/'/g, "\\'");
             const part2 = parts[1].trim().replace(/'/g, "\\'");
-            // STRICT CHECK: Name + Date
             query = `'${parentId}' in parents and name contains '${part1}' and name contains '${part2}' and name contains '${safeDate}' and trashed = false`;
         } 
         else {
@@ -189,7 +184,6 @@ async function syncHistory() {
         await refreshClickUpCache();
         const token = await getZoomAccessToken();
         
-        // Load Existing Log
         let completed = [];
         if (fs.existsSync(LOG_PATH)) {
             try { completed = JSON.parse(fs.readFileSync(LOG_PATH)); } catch (e) { completed = []; }
@@ -217,14 +211,24 @@ async function syncHistory() {
                     for (const meeting of res.data.meetings) {
                         counter++; 
 
-                        // 1. IGNORED EMAIL CHECK (Keep in log, don't check drive)
+                        // 1. AUTO-IGNORE (Email)
                         if (IGNORE_EMAILS.includes(user.email)) {
-                            // Ensure it's in the log
                             if (!completed.some(item => item.uuid === meeting.uuid)) {
                                 completed.push({ name: meeting.topic, uuid: meeting.uuid });
                             }
                             ignoredCount++;
                             continue;
+                        }
+
+                        // 🛑 SAFETY: IF ALREADY HAS ✅, SKIP CHECK, KEEP IN LOG
+                        if (meeting.topic.includes('✅')) {
+                            if (!completed.some(item => item.uuid === meeting.uuid)) {
+                                completed.push({ name: meeting.topic, uuid: meeting.uuid });
+                            }
+                            console.log(`${counter}) 🛡️ Already Marked (✅). Kept in Log: "${meeting.topic}"`);
+                            // Save periodically
+                            fs.writeFileSync(LOG_PATH, JSON.stringify(completed, null, 2));
+                            continue; // Skip the Drive check entirely
                         }
 
                         // 2. SETUP TARGET
@@ -235,7 +239,11 @@ async function syncHistory() {
                             isSales = true;
                             targetFolderId = SALES_TEAM_FOLDERS[user.email];
                         } else {
-                            if (!meeting.topic.includes(' x ')) continue;
+                            if (!meeting.topic.includes(' x ')) {
+                                missingList.push(`[BAD NAME] ${meeting.topic} (User: ${user.email})`);
+                                console.log(`${counter}) ⚠️ Skipped (Bad Name): ${meeting.topic}`);
+                                continue; 
+                            }
                             const nameParts = meeting.topic.split(' x ');
                             let brand = nameParts[1].split('-')[0].trim();
                             if (nameParts[1].includes("Scale Session")) brand = nameParts[0].trim();
@@ -248,9 +256,7 @@ async function syncHistory() {
                         }
 
                         if (!targetFolderId) {
-                            // If we can't find a folder, we can't verify it.
-                            // If it WAS in completed log, we should remove it to be safe (or keep it if you trust old runs).
-                            // Here: We remove it from Log to force a re-try or fail log in server.js
+                            // If not found in ClickUp, remove from Log if it was there
                             if (completed.some(item => item.uuid === meeting.uuid)) {
                                 completed = completed.filter(item => item.uuid !== meeting.uuid);
                                 removedCount++;
@@ -261,13 +267,10 @@ async function syncHistory() {
                         }
 
                         // 3. CHECK DRIVE (Strict Date Check)
-                        const niceDate = getFormattedDate(meeting.start_time); // "25 December 2025"
-                        
-                        // process.stdout.write(`${counter}) Checking "${meeting.topic}" (${niceDate})... `);
+                        const niceDate = getFormattedDate(meeting.start_time);
                         const exists = await checkDriveExistence(isSales, meeting.topic, targetFolderId, niceDate);
 
                         if (exists) {
-                            // ✅ IT EXISTS: Add to log (or keep it)
                             if (!completed.some(item => item.uuid === meeting.uuid)) {
                                 completed.push({ name: meeting.topic, uuid: meeting.uuid });
                             }
@@ -275,7 +278,7 @@ async function syncHistory() {
                             foundCount++;
                             console.log(`${counter}) ✅ Verified: "${meeting.topic}"`);
                         } else {
-                            // ❌ MISSING: Remove from Log if present
+                            // Remove from log if Drive verification fails
                             if (completed.some(item => item.uuid === meeting.uuid)) {
                                 completed = completed.filter(item => item.uuid !== meeting.uuid);
                                 removedCount++;
@@ -286,7 +289,6 @@ async function syncHistory() {
                             missingList.push(`[MISSING] ${meeting.topic}`);
                         }
                         
-                        // Save State
                         fs.writeFileSync(LOG_PATH, JSON.stringify(completed, null, 2));
                     }
                 } catch (e) { /* Ignore */ }
@@ -299,6 +301,7 @@ async function syncHistory() {
         console.log(`   🔢 Total Scanned: ${counter}`);
         console.log(`   🚫 Auto-Ignored: ${ignoredCount}`);
         console.log(`   ✅ Confirmed Safe: ${foundCount}`);
+        console.log(`   🛡️ Skipped (Already ✅): (Included in Total)`);
         console.log(`   🧹 Removed from Log: ${removedCount}`);
         console.log(`   ❌ Missing Videos: ${missingList.length}`);
         
