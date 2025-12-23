@@ -27,7 +27,7 @@ const { google } = require('googleapis');
 const querystring = require('querystring');
 
 // --- 🛡️ CONFIGURATION ---
-const SCAN_MONTHS_BACK = 6; // Scan back enough to cover Oct 22
+const SCAN_MONTHS_BACK = 6; 
 const START_DATE_STR = "2025-10-22"; // 📅 START CHECKING FROM THIS DATE
 const TOKEN_PATH = path.join(__dirname, 'zoom_token.json');
 const LOG_PATH = path.join(__dirname, 'completed_log.json');
@@ -81,12 +81,12 @@ function saveToLog(newData) {
     if (fs.existsSync(LOG_PATH)) {
         try { currentLog = JSON.parse(fs.readFileSync(LOG_PATH)); } catch (e) { currentLog = []; }
     }
-    // Update if exists, or push new
     const index = currentLog.findIndex(item => item.uuid === newData.uuid);
     if (index !== -1) {
-        currentLog[index] = newData; // Update existing
+        // Merge new data into existing (keeps older valid fields if needed)
+        currentLog[index] = { ...currentLog[index], ...newData };
     } else {
-        currentLog.push(newData); // Add new
+        currentLog.push(newData);
     }
     fs.writeFileSync(LOG_PATH, JSON.stringify(currentLog, null, 2));
 }
@@ -156,7 +156,8 @@ function getFolderIds(brandName) {
     return { internal: extractId(task.i), member: extractId(task.m) };
 }
 
-// 🔍 DRIVE CHECKER
+// 🧠 TIERED DRIVE CHECKER
+// Returns: { found: boolean, link: string | null, method: string }
 async function verifyInDrive(isSales, topic, dateStr, salesParentId, brandIds) {
     const oauth2Client = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, "http://localhost");
     oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
@@ -165,50 +166,86 @@ async function verifyInDrive(isSales, topic, dateStr, salesParentId, brandIds) {
     try {
         let cleanTopic = topic.includes("Scale Session") ? topic.replace("Scale Session", "").trim() : topic;
         const safeDate = dateStr.replace(/'/g, "\\'");
+        const safeName = topic.replace(/'/g, "\\'");
         
+        let foundLink = null;
+
+        // --- 1. SALES LOGIC ---
         if (isSales) {
-            const safeName = topic.replace(/'/g, "\\'");
+            // A: Find the Folder
             const folderQuery = `mimeType = 'application/vnd.google-apps.folder' and '${salesParentId}' in parents and name = '${safeName}' and trashed = false`;
-            const folderRes = await drive.files.list({ q: folderQuery, fields: 'files(id)', supportsAllDrives: true, includeItemsFromAllDrives: true });
-            if (!folderRes.data.files || folderRes.data.files.length === 0) return false;
+            const folderRes = await drive.files.list({ q: folderQuery, fields: 'files(id, webViewLink)', supportsAllDrives: true, includeItemsFromAllDrives: true });
             
+            if (!folderRes.data.files || folderRes.data.files.length === 0) return { found: false };
             const specificFolderId = folderRes.data.files[0].id;
-            const fileQuery = `'${specificFolderId}' in parents and name contains '${safeName}' and name contains '${safeDate}' and trashed = false`;
-            const fileRes = await drive.files.list({ q: fileQuery, fields: 'files(id)', supportsAllDrives: true, includeItemsFromAllDrives: true });
-            return fileRes.data.files.length > 0;
-        } else {
-            if (!brandIds) return false;
+            const folderLink = folderRes.data.files[0].webViewLink;
+
+            // B: TIER 1 - Strict Search (Name + Date)
+            const strictQuery = `'${specificFolderId}' in parents and name contains '${safeName}' and name contains '${safeDate}' and trashed = false`;
+            const strictRes = await drive.files.list({ q: strictQuery, fields: 'files(id, webViewLink)', supportsAllDrives: true, includeItemsFromAllDrives: true });
+            
+            if (strictRes.data.files.length > 0) {
+                return { found: true, link: folderLink, method: "Strict (Name+Date)" }; // Return Folder Link for Sales
+            }
+
+            // C: TIER 2 - Relaxed Search (Name Only)
+            const relaxedQuery = `'${specificFolderId}' in parents and name contains '${safeName}' and trashed = false`;
+            const relaxedRes = await drive.files.list({ q: relaxedQuery, fields: 'files(id, webViewLink)', supportsAllDrives: true, includeItemsFromAllDrives: true });
+
+            if (relaxedRes.data.files.length > 0) {
+                 return { found: true, link: folderLink, method: "Relaxed (Name Only)" };
+            }
+
+            return { found: false };
+        }
+
+        // --- 2. BRAND LOGIC ---
+        else {
+            if (!brandIds) return { found: false };
+            
             const part1 = cleanTopic.split(' x ')[0].trim().replace(/'/g, "\\'");
             
             let parentQuery = "";
             if (brandIds.internal && brandIds.member) parentQuery = `('${brandIds.internal}' in parents or '${brandIds.member}' in parents)`;
             else if (brandIds.internal) parentQuery = `'${brandIds.internal}' in parents`;
             else if (brandIds.member) parentQuery = `'${brandIds.member}' in parents`;
-            else return false;
+            else return { found: false };
 
-            const query = `${parentQuery} and name contains '${part1}' and name contains '${safeDate}' and trashed = false`;
-            const res = await drive.files.list({ q: query, fields: 'files(id)', supportsAllDrives: true, includeItemsFromAllDrives: true });
-            return res.data.files.length > 0;
+            // TIER 1 - Strict (Name + Date)
+            const strictQuery = `${parentQuery} and name contains '${part1}' and name contains '${safeDate}' and trashed = false`;
+            const strictRes = await drive.files.list({ q: strictQuery, fields: 'files(id, webViewLink)', supportsAllDrives: true, includeItemsFromAllDrives: true });
+            
+            if (strictRes.data.files.length > 0) {
+                return { found: true, link: strictRes.data.files[0].webViewLink, method: "Strict (Name+Date)" };
+            }
+
+            // TIER 2 - Relaxed (Name Only)
+            const relaxedQuery = `${parentQuery} and name contains '${part1}' and trashed = false`;
+            const relaxedRes = await drive.files.list({ q: relaxedQuery, fields: 'files(id, webViewLink)', supportsAllDrives: true, includeItemsFromAllDrives: true });
+
+            if (relaxedRes.data.files.length > 0) {
+                return { found: true, link: relaxedRes.data.files[0].webViewLink, method: "Relaxed (Name Only)" };
+            }
+
+            return { found: false };
         }
-    } catch (e) { return false; }
+    } catch (e) { return { found: false }; }
 }
 
 // --- MAIN SCRIPT ---
 async function syncHistory() {
     try {
-        console.log(`🕵️ STARTING RE-ARCHITECTED SYNC...`);
+        console.log(`🕵️ STARTING TIERED SYNC...`);
         console.log(`📅 TARGET RANGE: ${START_DATE_STR} to TODAY`);
-        console.log(`   (Older videos will be ignored)`);
         
         await refreshClickUpCache();
         const token = await getZoomAccessToken();
-        
         const usersRes = await axios.get('https://api.zoom.us/v2/users?page_size=300', { headers: { 'Authorization': `Bearer ${token}` } });
         const users = usersRes.data.users || [];
 
         let counter = 0;
         let foundCount = 0;
-        const startCheckTime = new Date(START_DATE_STR).getTime(); // Oct 22 Timestamp
+        const startCheckTime = new Date(START_DATE_STR).getTime(); 
 
         for (const user of users) {
             for (let i = 0; i < SCAN_MONTHS_BACK; i++) {
@@ -223,34 +260,26 @@ async function syncHistory() {
 
                     for (const meeting of res.data.meetings) {
                         const meetingTime = new Date(meeting.start_time).getTime();
-                        const niceDate = getFormattedDate(meeting.start_time);
-
-                        // 🛑 DATE START CHECK
-                        // If Meeting is OLDER (Less) than Start Date -> SKIP
-                        if (meetingTime < startCheckTime) {
-                            // console.log(`   ⏭️ Skipped (Too Old): "${meeting.topic}" (${niceDate})`);
-                            continue;
-                        }
+                        if (meetingTime < startCheckTime) continue; // Skip Old
 
                         counter++;
+                        const niceDate = getFormattedDate(meeting.start_time);
 
-                        // 🏗️ DATA OBJECT
                         const videoData = {
                             name: meeting.topic,
                             uuid: meeting.uuid,
                             date: niceDate,
-                            link: meeting.share_url,
-                            status: "Pending"
+                            zoom_link: meeting.share_url,
+                            status: "Pending",
+                            drive_link: null // New Field
                         };
 
-                        // 1. 🟢 CHECK: IGNORED EMAILS
                         if (IGNORE_EMAILS.includes(user.email)) {
                             videoData.status = "Ignored User";
                             saveToLog(videoData);
                             continue;
                         }
 
-                        // 2. 🟢 CHECK: ALREADY HAS ✅
                         if (meeting.topic.includes('✅')) {
                             videoData.status = "Already Marked ✅";
                             saveToLog(videoData);
@@ -258,7 +287,7 @@ async function syncHistory() {
                             continue;
                         }
 
-                        // 3. 🟡 PREPARE DRIVE CHECK
+                        // SETUP CHECKS
                         let isSales = false;
                         let salesParentId = null;
                         let brandIds = null;
@@ -287,17 +316,21 @@ async function syncHistory() {
                             }
                         }
 
-                        // 4. 🔍 PERFORM DEEP DRIVE VERIFICATION
-                        const exists = await verifyInDrive(isSales, meeting.topic, niceDate, salesParentId, brandIds);
+                        // 🧠 PERFORM CHECK (Tiered)
+                        const result = await verifyInDrive(isSales, meeting.topic, niceDate, salesParentId, brandIds);
 
-                        if (exists) {
+                        if (result.found) {
                             videoData.status = "Verified in Drive";
+                            videoData.drive_link = result.link; // Save Drive Link
+                            videoData.method = result.method; // Save Method (Strict/Relaxed)
+                            
                             saveToLog(videoData);
                             await markZoomComplete(meeting.uuid, meeting.topic, token);
+                            
                             foundCount++;
-                            console.log(`${counter}) ✅ Verified & Saved: "${meeting.topic}"`);
+                            console.log(`${counter}) ✅ Verified (${result.method}): "${meeting.topic}"`);
                         } else {
-                            missingList.push(`[MISSING FILE] ${meeting.topic} (Date: ${niceDate})`);
+                            missingList.push(`[MISSING FILE] ${meeting.topic}`);
                             console.log(`${counter}) ❌ Not Found in Drive: "${meeting.topic}"`);
                         }
                     }
@@ -305,12 +338,9 @@ async function syncHistory() {
             }
         }
 
-        // --- REPORTING ---
         console.log("\n===========================================");
         console.log("🏁 FULL AUDIT COMPLETE");
-        console.log("===========================================");
-        console.log(`   📅 Range: ${START_DATE_STR} - Today`);
-        console.log(`   🔢 Total In-Range Scanned: ${counter}`);
+        console.log(`   🔢 Total Scanned: ${counter}`);
         console.log(`   ✅ Validated & Saved: ${foundCount}`);
         console.log(`   ❌ Missing / Issues: ${missingList.length}`);
         
