@@ -27,8 +27,8 @@ const { google } = require('googleapis');
 const querystring = require('querystring');
 
 // --- 🛡️ CONFIGURATION ---
-const SCAN_MONTHS_BACK = 48; // 4 Years (Reaches start of company)
-const CUTOFF_DATE_STR = "2025-10-22"; // 📅 IGNORE anything NEWER than this date
+const SCAN_MONTHS_BACK = 6; // Scan back enough to cover Oct 22
+const START_DATE_STR = "2025-10-22"; // 📅 START CHECKING FROM THIS DATE
 const TOKEN_PATH = path.join(__dirname, 'zoom_token.json');
 const LOG_PATH = path.join(__dirname, 'completed_log.json');
 const REPORT_PATH = path.join(__dirname, 'missing_report.txt');
@@ -81,11 +81,14 @@ function saveToLog(newData) {
     if (fs.existsSync(LOG_PATH)) {
         try { currentLog = JSON.parse(fs.readFileSync(LOG_PATH)); } catch (e) { currentLog = []; }
     }
-    // Prevent duplicates based on UUID
-    if (!currentLog.some(item => item.uuid === newData.uuid)) {
-        currentLog.push(newData);
-        fs.writeFileSync(LOG_PATH, JSON.stringify(currentLog, null, 2));
+    // Update if exists, or push new
+    const index = currentLog.findIndex(item => item.uuid === newData.uuid);
+    if (index !== -1) {
+        currentLog[index] = newData; // Update existing
+    } else {
+        currentLog.push(newData); // Add new
     }
+    fs.writeFileSync(LOG_PATH, JSON.stringify(currentLog, null, 2));
 }
 
 async function getZoomAccessToken() {
@@ -193,8 +196,9 @@ async function verifyInDrive(isSales, topic, dateStr, salesParentId, brandIds) {
 // --- MAIN SCRIPT ---
 async function syncHistory() {
     try {
-        console.log(`🕵️ STARTING RE-ARCHITECTED SYNC (${SCAN_MONTHS_BACK} Months)...`);
-        console.log(`📅 CUTOFF DATE: ${CUTOFF_DATE_STR} (Ignoring videos newer than this)`);
+        console.log(`🕵️ STARTING RE-ARCHITECTED SYNC...`);
+        console.log(`📅 TARGET RANGE: ${START_DATE_STR} to TODAY`);
+        console.log(`   (Older videos will be ignored)`);
         
         await refreshClickUpCache();
         const token = await getZoomAccessToken();
@@ -204,7 +208,7 @@ async function syncHistory() {
 
         let counter = 0;
         let foundCount = 0;
-        const cutoffTime = new Date(CUTOFF_DATE_STR).getTime(); // Timestamp for quick comparison
+        const startCheckTime = new Date(START_DATE_STR).getTime(); // Oct 22 Timestamp
 
         for (const user of users) {
             for (let i = 0; i < SCAN_MONTHS_BACK; i++) {
@@ -218,16 +222,17 @@ async function syncHistory() {
                     if (!res.data.meetings) continue;
 
                     for (const meeting of res.data.meetings) {
-                        counter++;
-                        const niceDate = getFormattedDate(meeting.start_time);
                         const meetingTime = new Date(meeting.start_time).getTime();
+                        const niceDate = getFormattedDate(meeting.start_time);
 
-                        // 🛑 DATE CUTOFF CHECK
-                        // If Meeting is NEWER (Greater) than Cutoff -> SKIP
-                        if (meetingTime > cutoffTime) {
-                            // console.log(`${counter}) ⏭️ Skipped (Past Cutoff): "${meeting.topic}" (${niceDate})`);
+                        // 🛑 DATE START CHECK
+                        // If Meeting is OLDER (Less) than Start Date -> SKIP
+                        if (meetingTime < startCheckTime) {
+                            // console.log(`   ⏭️ Skipped (Too Old): "${meeting.topic}" (${niceDate})`);
                             continue;
                         }
+
+                        counter++;
 
                         // 🏗️ DATA OBJECT
                         const videoData = {
@@ -300,10 +305,12 @@ async function syncHistory() {
             }
         }
 
+        // --- REPORTING ---
         console.log("\n===========================================");
         console.log("🏁 FULL AUDIT COMPLETE");
         console.log("===========================================");
-        console.log(`   🔢 Total Scanned: ${counter}`);
+        console.log(`   📅 Range: ${START_DATE_STR} - Today`);
+        console.log(`   🔢 Total In-Range Scanned: ${counter}`);
         console.log(`   ✅ Validated & Saved: ${foundCount}`);
         console.log(`   ❌ Missing / Issues: ${missingList.length}`);
         
