@@ -26,8 +26,9 @@ const path = require('path');
 const { google } = require('googleapis');
 const querystring = require('querystring');
 
-// --- CONFIGURATION ---
-const SCAN_MONTHS_BACK = 48; // 4 Years
+// --- 🛡️ CONFIGURATION ---
+const SCAN_MONTHS_BACK = 48; // 4 Years (Reaches start of company)
+const CUTOFF_DATE_STR = "2025-10-22"; // 📅 IGNORE anything NEWER than this date
 const TOKEN_PATH = path.join(__dirname, 'zoom_token.json');
 const LOG_PATH = path.join(__dirname, 'completed_log.json');
 const REPORT_PATH = path.join(__dirname, 'missing_report.txt');
@@ -80,7 +81,7 @@ function saveToLog(newData) {
     if (fs.existsSync(LOG_PATH)) {
         try { currentLog = JSON.parse(fs.readFileSync(LOG_PATH)); } catch (e) { currentLog = []; }
     }
-    // Prevent duplicates
+    // Prevent duplicates based on UUID
     if (!currentLog.some(item => item.uuid === newData.uuid)) {
         currentLog.push(newData);
         fs.writeFileSync(LOG_PATH, JSON.stringify(currentLog, null, 2));
@@ -100,7 +101,7 @@ async function getZoomAccessToken() {
     return tokenData.access_token;
 }
 
-// 🏷️ RENAME ZOOM (Add ✅)
+// 🏷️ RENAME ZOOM
 async function markZoomComplete(meetingId, currentTopic, token) {
     if (currentTopic.includes('✅')) return; 
     try {
@@ -108,7 +109,6 @@ async function markZoomComplete(meetingId, currentTopic, token) {
         const newTopic = `${currentTopic} ✅`;
         await axios.patch(`https://api.zoom.us/v2/meetings/${safeId}`, { topic: newTopic }, { headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' } });
     } catch (e) {
-        // Retry logic for 404/slashes
         if (e.response && e.response.status === 404) {
              try {
                 const doubleId = encodeURIComponent(encodeURIComponent(meetingId));
@@ -144,21 +144,16 @@ async function refreshClickUpCache() {
 function getFolderIds(brandName) {
     const task = CLICKUP_CACHE.find(t => t.n === brandName.trim().toLowerCase());
     if (!task) return null;
-
     const extractId = (link) => {
         if (!link) return null;
         if (link.includes('id=')) return link.split('id=')[1].split('?')[0];
         const parts = link.split('/');
         return parts[parts.length - 1] || parts[parts.length - 2];
     };
-
-    return { 
-        internal: extractId(task.i), 
-        member: extractId(task.m) 
-    };
+    return { internal: extractId(task.i), member: extractId(task.m) };
 }
 
-// 🔍 DRIVE CHECKER (The Brain)
+// 🔍 DRIVE CHECKER
 async function verifyInDrive(isSales, topic, dateStr, salesParentId, brandIds) {
     const oauth2Client = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, "http://localhost");
     oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
@@ -168,47 +163,30 @@ async function verifyInDrive(isSales, topic, dateStr, salesParentId, brandIds) {
         let cleanTopic = topic.includes("Scale Session") ? topic.replace("Scale Session", "").trim() : topic;
         const safeDate = dateStr.replace(/'/g, "\\'");
         
-        // --- 1. SALES LOGIC ---
         if (isSales) {
-            // A: Find the Folder first
             const safeName = topic.replace(/'/g, "\\'");
             const folderQuery = `mimeType = 'application/vnd.google-apps.folder' and '${salesParentId}' in parents and name = '${safeName}' and trashed = false`;
-            
             const folderRes = await drive.files.list({ q: folderQuery, fields: 'files(id)', supportsAllDrives: true, includeItemsFromAllDrives: true });
             if (!folderRes.data.files || folderRes.data.files.length === 0) return false;
             
             const specificFolderId = folderRes.data.files[0].id;
-
-            // B: Look INSIDE that folder for "Topic - Date"
-            // We search for file name matching: "Angelo x EE Scale Session - 25 December 2025"
             const fileQuery = `'${specificFolderId}' in parents and name contains '${safeName}' and name contains '${safeDate}' and trashed = false`;
             const fileRes = await drive.files.list({ q: fileQuery, fields: 'files(id)', supportsAllDrives: true, includeItemsFromAllDrives: true });
-            
             return fileRes.data.files.length > 0;
-        }
-
-        // --- 2. BRAND LOGIC ---
-        else {
+        } else {
             if (!brandIds) return false;
-            
-            // We search for any file (mp4, etc) containing Topic AND Date
-            // Search in Internal OR Member folders
             const part1 = cleanTopic.split(' x ')[0].trim().replace(/'/g, "\\'");
-            const part2 = cleanTopic.split(' x ')[1] ? cleanTopic.split(' x ')[1].trim().replace(/'/g, "\\'") : "";
-
+            
             let parentQuery = "";
             if (brandIds.internal && brandIds.member) parentQuery = `('${brandIds.internal}' in parents or '${brandIds.member}' in parents)`;
             else if (brandIds.internal) parentQuery = `'${brandIds.internal}' in parents`;
             else if (brandIds.member) parentQuery = `'${brandIds.member}' in parents`;
             else return false;
 
-            // The Search: Parent Folder AND (Topic Name Parts) AND Date
             const query = `${parentQuery} and name contains '${part1}' and name contains '${safeDate}' and trashed = false`;
-            
             const res = await drive.files.list({ q: query, fields: 'files(id)', supportsAllDrives: true, includeItemsFromAllDrives: true });
             return res.data.files.length > 0;
         }
-
     } catch (e) { return false; }
 }
 
@@ -216,6 +194,7 @@ async function verifyInDrive(isSales, topic, dateStr, salesParentId, brandIds) {
 async function syncHistory() {
     try {
         console.log(`🕵️ STARTING RE-ARCHITECTED SYNC (${SCAN_MONTHS_BACK} Months)...`);
+        console.log(`📅 CUTOFF DATE: ${CUTOFF_DATE_STR} (Ignoring videos newer than this)`);
         
         await refreshClickUpCache();
         const token = await getZoomAccessToken();
@@ -225,6 +204,7 @@ async function syncHistory() {
 
         let counter = 0;
         let foundCount = 0;
+        const cutoffTime = new Date(CUTOFF_DATE_STR).getTime(); // Timestamp for quick comparison
 
         for (const user of users) {
             for (let i = 0; i < SCAN_MONTHS_BACK; i++) {
@@ -240,7 +220,15 @@ async function syncHistory() {
                     for (const meeting of res.data.meetings) {
                         counter++;
                         const niceDate = getFormattedDate(meeting.start_time);
-                        
+                        const meetingTime = new Date(meeting.start_time).getTime();
+
+                        // 🛑 DATE CUTOFF CHECK
+                        // If Meeting is NEWER (Greater) than Cutoff -> SKIP
+                        if (meetingTime > cutoffTime) {
+                            // console.log(`${counter}) ⏭️ Skipped (Past Cutoff): "${meeting.topic}" (${niceDate})`);
+                            continue;
+                        }
+
                         // 🏗️ DATA OBJECT
                         const videoData = {
                             name: meeting.topic,
@@ -284,11 +272,9 @@ async function syncHistory() {
                             
                             brandIds = getFolderIds(brand);
                             if (!brandIds) {
-                                // Try reverse
                                 let reverseBrand = nameParts[0].trim();
                                 brandIds = getFolderIds(reverseBrand);
                             }
-
                             if (!brandIds) {
                                 missingList.push(`[NO CLICKUP] ${meeting.topic}`);
                                 console.log(`${counter}) ❌ Brand Not Found: "${meeting.topic}"`);
@@ -302,10 +288,7 @@ async function syncHistory() {
                         if (exists) {
                             videoData.status = "Verified in Drive";
                             saveToLog(videoData);
-                            
-                            // 5. 🖊️ RENAME ZOOM
                             await markZoomComplete(meeting.uuid, meeting.topic, token);
-                            
                             foundCount++;
                             console.log(`${counter}) ✅ Verified & Saved: "${meeting.topic}"`);
                         } else {
@@ -317,7 +300,6 @@ async function syncHistory() {
             }
         }
 
-        // --- REPORTING ---
         console.log("\n===========================================");
         console.log("🏁 FULL AUDIT COMPLETE");
         console.log("===========================================");
