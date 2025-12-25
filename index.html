@@ -255,7 +255,6 @@ async function checkZoom() {
         const startCheckTime = new Date(START_DATE_STR).getTime(); 
 
         for (const user of users) {
-            // 🚫 EMAILS: Just continue, DO NOT LOG
             if (IGNORE_EMAILS.includes(user.email)) continue;
 
             for (let i = 0; i < SCAN_MONTHS_BACK; i++) {
@@ -272,15 +271,8 @@ async function checkZoom() {
                         if (new Date(meeting.start_time).getTime() < startCheckTime) continue;
                         if (completed.some(item => item.uuid === meeting.uuid)) continue;
                         
-                        // 🛡️ ALREADY ✅: Log success and skip upload
                         if (meeting.topic.includes('✅')) {
-                             saveToLog({ 
-                                name: meeting.topic, 
-                                uuid: meeting.uuid, 
-                                date: getFormattedDate(meeting.start_time),
-                                status: "Already Marked ✅ (Auto-Skipped)"
-                             });
-                             console.log(`      🛡️ Skipping (Already ✅): "${meeting.topic}"`);
+                             saveToLog({ name: meeting.topic, uuid: meeting.uuid, date: getFormattedDate(meeting.start_time), status: "Already Marked ✅ (Auto-Skipped)" });
                              continue;
                         }
 
@@ -336,10 +328,7 @@ async function checkZoom() {
                             }
                         }
 
-                        // 🚫 SKIPPED: Just continue, DO NOT LOG
-                        if (shouldSkipForever) {
-                            continue;
-                        }
+                        if (shouldSkipForever) continue;
 
                         if (!links || !links.internalFolderId) {
                             console.log(`      ❌ Brand "${brand}" missing details.`);
@@ -357,9 +346,17 @@ async function checkZoom() {
                         for (const file of meeting.recording_files) {
                             if (file.file_extension && file.file_extension.toLowerCase() === 'json') continue;
                             if (file.file_type === 'TIMELINE') continue;
-                            if (file.file_size && file.file_size < 1024) continue; 
+                            
+                            // 🟢 ALLOW CHAT & TEXT FILES (Ignore size limit for them)
+                            const isTextFile = (file.file_extension && file.file_extension.toUpperCase() === 'TXT') || file.file_type === 'CHAT';
+                            if (!isTextFile && file.file_size && file.file_size < 1024) continue; 
 
-                            const fileExt = file.file_type === 'MP4' ? '.mp4' : (file.file_type === 'M4A' ? '.m4a' : `.${file.file_extension.toLowerCase()}`);
+                            // 🟢 EXTENSION HANDLING
+                            let fileExt = `.${file.file_extension.toLowerCase()}`;
+                            if (file.file_type === 'MP4') fileExt = '.mp4';
+                            else if (file.file_type === 'M4A') fileExt = '.m4a';
+                            else if (file.file_type === 'CHAT') fileExt = '.txt';
+
                             let finalFileName = `${meeting.topic} - ${niceDate}${fileExt}`.replace(/[:\/]/g, '');
                             const tempPath = path.join(__dirname, finalFileName);
 
@@ -369,10 +366,14 @@ async function checkZoom() {
                                 streamRes.data.pipe(writer);
                                 await new Promise((resolve, reject) => { writer.on('finish', resolve); writer.on('error', reject); });
 
+                                // 🟢 DESTINATION LOGIC
                                 let targetFolder = links.internalFolderId;
                                 if (!isSalesEquation) {
+                                    // Videos go to Member, EVERYTHING ELSE (Audio, Chat, VTT) goes to Internal
                                     if (file.file_type === 'MP4') targetFolder = links.memberFolderId;
                                     else targetFolder = links.internalFolderId; 
+
+                                    // Travis Exception
                                     if (user.email === 'travis@ecommerceequation.com.au') targetFolder = links.internalFolderId;
                                 } else {
                                     targetFolder = links.internalFolderId; 
@@ -408,15 +409,7 @@ async function checkZoom() {
                                 await markZoomComplete(meeting.uuid, meeting.topic, token);
                             }
 
-                            // ✅ SUCCESS: Save this one!
-                            saveToLog({ 
-                                name: meeting.topic, 
-                                uuid: meeting.uuid, 
-                                date: niceDate,
-                                link: meeting.share_url,
-                                status: "Uploaded & Completed"
-                            });
-
+                            saveToLog({ name: meeting.topic, uuid: meeting.uuid, date: niceDate, link: meeting.share_url, status: "Uploaded & Completed" });
                         } else {
                             console.log("      ⚠️ Upload had errors. Zoom file NOT deleted. Will retry.");
                         }
