@@ -17,6 +17,7 @@
   </p>
 
   <h1>Final Test</h1>
+  <h1>Clean the completed_log.json and missing.txt</h1>
 <h1><strong>server.js</strong></h1>
 <code><pre>
 require('dotenv').config();
@@ -26,9 +27,10 @@ const path = require('path');
 const { google } = require('googleapis');
 const querystring = require('querystring');
 
+// --- 🛡️ CONFIGURATION ---
 const CHECK_INTERVAL_MINUTES = 20; 
-const SCAN_MONTHS_BACK = 6;     
-const START_DATE_STR = "2025-10-22";
+const SCAN_MONTHS_BACK = 6; 
+const START_DATE_STR = "2025-10-22"; // 📅 STRICT START DATE
 const TOKEN_PATH = path.join(__dirname, 'zoom_token.json');
 const LOG_PATH = path.join(__dirname, 'completed_log.json');
 const CLICKUP_LAST_1_1_ID = "a1461481-3edc-4c68-b542-3f24b2386dec";
@@ -108,6 +110,7 @@ async function getZoomAccessToken() {
     return tokenData.access_token;
 }
 
+// 💾 HELPER: Safe Save to JSON
 function saveToLog(newData) {
     let currentLog = [];
     if (fs.existsSync(LOG_PATH)) {
@@ -249,9 +252,10 @@ async function checkZoom() {
 
         const usersRes = await axios.get('https://api.zoom.us/v2/users?page_size=300', { headers: { 'Authorization': `Bearer ${token}` } });
         const users = usersRes.data.users || [];
-        const startCheckTime = new Date(START_DATE_STR).getTime(); // Date Check
+        const startCheckTime = new Date(START_DATE_STR).getTime(); 
 
         for (const user of users) {
+            // 🚫 EMAILS: Just continue, DO NOT LOG
             if (IGNORE_EMAILS.includes(user.email)) continue;
 
             for (let i = 0; i < SCAN_MONTHS_BACK; i++) {
@@ -266,9 +270,9 @@ async function checkZoom() {
 
                     for (const meeting of res.data.meetings) {
                         if (new Date(meeting.start_time).getTime() < startCheckTime) continue;
-
                         if (completed.some(item => item.uuid === meeting.uuid)) continue;
                         
+                        // 🛡️ ALREADY ✅: Log success and skip upload
                         if (meeting.topic.includes('✅')) {
                              saveToLog({ 
                                 name: meeting.topic, 
@@ -286,6 +290,7 @@ async function checkZoom() {
                         let shouldSkipForever = false;
                         let emailLinksDetail = ""; 
 
+                        // 1. SALES LOGIC
                         if (SALES_TEAM_FOLDERS[user.email]) {
                             if (!meeting.topic.includes(' x ') || !meeting.topic.includes('EE Scale Session')) {
                                 shouldSkipForever = true; 
@@ -305,6 +310,7 @@ async function checkZoom() {
                                 }
                             }
                         } 
+                        // 2. STANDARD LOGIC
                         else {
                             if (IGNORE_TOPICS.some(ignored => meeting.topic.includes(ignored))) {
                                 shouldSkipForever = true;
@@ -330,8 +336,8 @@ async function checkZoom() {
                             }
                         }
 
+                        // 🚫 SKIPPED: Just continue, DO NOT LOG
                         if (shouldSkipForever) {
-                            saveToLog({ name: meeting.topic, uuid: meeting.uuid, status: "Skipped (Format/Ignore)" });
                             continue;
                         }
 
@@ -347,10 +353,10 @@ async function checkZoom() {
                         const niceDate = getFormattedDate(meeting.start_time);
                         let updatedClickUp = false;
 
+                        // 📂 FILE UPLOAD LOOP
                         for (const file of meeting.recording_files) {
                             if (file.file_extension && file.file_extension.toLowerCase() === 'json') continue;
                             if (file.file_type === 'TIMELINE') continue;
-                            
                             if (file.file_size && file.file_size < 1024) continue; 
 
                             const fileExt = file.file_type === 'MP4' ? '.mp4' : (file.file_type === 'M4A' ? '.m4a' : `.${file.file_extension.toLowerCase()}`);
@@ -367,7 +373,6 @@ async function checkZoom() {
                                 if (!isSalesEquation) {
                                     if (file.file_type === 'MP4') targetFolder = links.memberFolderId;
                                     else targetFolder = links.internalFolderId; 
-                                    
                                     if (user.email === 'travis@ecommerceequation.com.au') targetFolder = links.internalFolderId;
                                 } else {
                                     targetFolder = links.internalFolderId; 
@@ -378,7 +383,6 @@ async function checkZoom() {
                                 
                                 if (file.file_type === 'MP4') {
                                         await sendEmailNotification('SUCCESS', finalFileName, brand, emailLinksDetail);
-                                        
                                         if (!isSalesEquation && links.taskId && !updatedClickUp) {
                                             await updateClickUpSmart(links.taskId, new Date(meeting.start_time).getTime());
                                             updatedClickUp = true;
@@ -404,6 +408,7 @@ async function checkZoom() {
                                 await markZoomComplete(meeting.uuid, meeting.topic, token);
                             }
 
+                            // ✅ SUCCESS: Save this one!
                             saveToLog({ 
                                 name: meeting.topic, 
                                 uuid: meeting.uuid, 
@@ -430,5 +435,342 @@ async function checkZoom() {
 })();
 </pre></code>
 
+<h1><strong>Completed_log.json</strong></h1>
+<code><pre>
+    [
+  {
+    "name": "PIXMAGIC x EE Scale Session",
+    "uuid": "ALIJDsIMQFCBU796Ss33hQ==",
+    "date": "22 December 2025",
+    "link": "https://us02web.zoom.us/rec/share/NK2ZJucqxV9hY5ACIISGV_dTbJjmY1C2pL8MTPVFKMuZdDxbAiiwj-rbpzCo5Dx2.tUjslte-0urSH5Wo",
+    "status": "Uploaded & Completed"
+  },
+  {
+    "name": "Fort Group x EE Scale Session ✅",
+    "uuid": "owxbwnGcSV+pey676fgf3g==",
+    "date": "14 November 2025",
+    "status": "Already Marked ✅ (Auto-Skipped)"
+  },
+  {
+    "name": "Bohemian Bright x EE Scale Session ✅",
+    "uuid": "lCk6mN1RSW+vs1EYLGupcA==",
+    "date": "7 November 2025",
+    "status": "Already Marked ✅ (Auto-Skipped)"
+  },
+  {
+    "name": "Via Artists x EE Scale Session ✅",
+    "uuid": "wlBCJfTFR3ub3X0p1oMQLw==",
+    "date": "7 November 2025",
+    "status": "Already Marked ✅ (Auto-Skipped)"
+  },
+  {
+    "name": "Kloke x EE Scale Session ✅",
+    "uuid": "RAMNfndARWW6USZkOHuU6Q==",
+    "date": "5 November 2025",
+    "status": "Already Marked ✅ (Auto-Skipped)"
+  },
+  {
+    "name": "Happy Olive Tree x EE Scale Session ✅",
+    "uuid": "QALXtN9eQWiEjsadK9kCeQ==",
+    "date": "3 November 2025",
+    "status": "Already Marked ✅ (Auto-Skipped)"
+  },
+  {
+    "name": "Koh x EE Scale Session",
+    "uuid": "UiP8xC+JQVOl85lRFRZy9w==",
+    "date": "22 October 2025",
+    "link": "https://us02web.zoom.us/rec/share/ewcTlKF0TTJ2AcIbnHcp8IIMQU7IGcmm9N3t3IdI-ysQEW3wcNUtA5In8iGVNTsO.OKyRAE-rXBR8lcJG",
+    "status": "Uploaded & Completed"
+  },
+  {
+    "name": "Fencestay x EE Scale Session",
+    "uuid": "/E6DnJyyS7yfgaqsElC3Sw==",
+    "date": "22 October 2025",
+    "link": "https://us02web.zoom.us/rec/share/Oo2mHcikV9UrQY5uOBru7AXlAQk6C2oMlNq9EwutElhNikImwzgCDB75BPV2K0ja.qZt842YKte4EgFa_",
+    "status": "Uploaded & Completed"
+  },
+  {
+    "name": "Sio Beauty x EE Scale Session",
+    "uuid": "nETlbNpvQiuJoqJPaayWYQ==",
+    "date": "20 December 2025",
+    "link": "https://us02web.zoom.us/rec/share/ZBmrIOsAgsDu6Wg7JTH5KLlVvj8DdFeC9J0RrYJSd7EmMwDrAM3rzuwk4bLC_qeA.4qPp1c8wqnNWihIF",
+    "status": "Uploaded & Completed"
+  },
+  {
+    "name": "Find The Good Brand x EE Scale Session ✅",
+    "uuid": "SDF/61z7Q+Wz3yCLiDtyZQ==",
+    "date": "8 November 2025",
+    "status": "Already Marked ✅ (Auto-Skipped)"
+  },
+  {
+    "name": "ADDUCATES x EE Scale Session ✅",
+    "uuid": "KE988ZytR2eMQ+rpbJhvtw==",
+    "date": "8 November 2025",
+    "status": "Already Marked ✅ (Auto-Skipped)"
+  },
+  {
+    "name": "✅FluidStance x EE Scale Session - 25 October 2025",
+    "uuid": "JzAjRM2eTD2aMPpbsy7HLw==",
+    "date": "25 October 2025",
+    "status": "Already Marked ✅ (Auto-Skipped)"
+  },
+  {
+    "name": "✅Shenelle x EE Scale Session - 23 October 2025",
+    "uuid": "4f1mhGemSJSt+suk/5RhRQ==",
+    "date": "24 October 2025",
+    "status": "Already Marked ✅ (Auto-Skipped)"
+  },
+  {
+    "name": "Lyons Leather Co x EE Scale Session",
+    "uuid": "Zm67MIomRgmP77WFSmn8yg==",
+    "date": "23 October 2025",
+    "link": "https://us02web.zoom.us/rec/share/Egif1QmcIKbO-pWZVpjvkZHrJ41SAQFwx47zqqzkjn-aVSHtfs9nC_olKAiP3pVi.tFPmVS5CxvNvdAUx",
+    "status": "Uploaded & Completed"
+  },
+  {
+    "name": "Revvies Energy Strips x EE Scale Session",
+    "uuid": "XsZjZQO9SrON+aZLBX4eXA==",
+    "date": "22 October 2025",
+    "link": "https://us02web.zoom.us/rec/share/9aQ0hsn83N_SoN2uOqMWCTouRLiA268YtMUIuG-Y4FmtI0rjeRSpHMCPaYzNXMhw._nVlK-h55AwOvFgO",
+    "status": "Uploaded & Completed"
+  },
+  {
+    "name": "Justin Tong x Garrett x EE Scale Session ",
+    "uuid": "69NBUrR0Rrurr6EX5nnmYA==",
+    "date": "15 December 2025",
+    "link": "https://us02web.zoom.us/rec/share/uIzEkQ_dOKwaDvOImMsjo1whnwJTQva-o4PG33W0LOKqv-1IW-4sEguv-6ExKEw6.BBYpqCShamsiFxaN",
+    "status": "Uploaded & Completed"
+  },
+  {
+    "name": "Skittle Lane Coffee x EE Scale Session",
+    "uuid": "gUFZWvQ0QWyXh1HngmiU7A==",
+    "date": "12 December 2025",
+    "link": "https://us02web.zoom.us/rec/share/-SBUobwArXNkTbsM0EXvDv_64ySTUMOfoBA-wjmuYViuvq_GGrWpqNGqA7iuQThZ.wDzAGXgcC4pXZRAD",
+    "status": "Uploaded & Completed"
+  },
+  {
+    "name": "Living in a Bubble x EE Scale Session",
+    "uuid": "6dxl9FHXRsG3xjhjvv5kEQ==",
+    "date": "25 November 2025",
+    "link": "https://us02web.zoom.us/rec/share/LZBzRFIY4XKe7iPhGhQ8GpDwNH0AKPLif8tSPlJHFAS4NfhjMo8vtK57Wp04ASzN.UV4Z07NzIjoQ_cRB",
+    "status": "Uploaded & Completed"
+  },
+  {
+    "name": "Gympie Saddle World x EE Scale Session",
+    "uuid": "JqTJ97I9RNGSBANW0qIKYA==",
+    "date": "12 November 2025",
+    "link": "https://us02web.zoom.us/rec/share/cMc9zcpEa5t5bgoSC6B11D1Syj_WIn-qNmja5PeVeb9wDD74vAnkods4CO7TmAl6.xI3EtG3q77zzEQw7",
+    "status": "Uploaded & Completed"
+  },
+  {
+    "name": "Rusty DC X EE Scale Session ✅",
+    "uuid": "1a/UF2KrShmFeoMdf8eDAw==",
+    "date": "7 November 2025",
+    "status": "Already Marked ✅ (Auto-Skipped)"
+  },
+  {
+    "name": "Raw & Fresh Pet Food x EE Scale Session",
+    "uuid": "y9FpXSKHTCy2HnmmnTab0A==",
+    "date": "31 October 2025",
+    "link": "https://us02web.zoom.us/rec/share/N3kg6JrH5VVgPyiZsj9NGcmYyojaznNINATtc9HE1P31e5ed_gtiYbRmkg3bUz6S.TBbWPAAx0XzWAEre",
+    "status": "Uploaded & Completed"
+  }
+]
+</pre></code>
+
+<h1><strong>history checker</strong></h1>
+<code><pre>
+require('dotenv').config();
+const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
+const { google } = require('googleapis');
+const querystring = require('querystring');
+
+// --- CONFIGURATION ---
+const SCAN_MONTHS_BACK = 6;
+const START_DATE_STR = "2025-10-22"; // 📅 START CHECKING FROM HERE
+const TOKEN_PATH = path.join(__dirname, 'zoom_token.json');
+const LOG_PATH = path.join(__dirname, 'completed_log.json');
+const REPORT_PATH = path.join(__dirname, 'sales_missing_report.txt');
+
+// 🛒 SALES TEAM ONLY
+const SALES_TEAM_FOLDERS = {
+    "yoshi@ecommerceequation.com.au": "1i-1JcXYriROX05FJ1vq-Si9p885cYdnh",
+    "shant@ecommerceequation.com.au": "1HKQN41WjsOay2oQTPLeDlooZRi0jqRsf",
+    "jaket@ecommerceequation.com.au": "1UPVHx1DpeooUi6bnoKwNa0tPPXsWDV9M",
+    "seanb@ecommerceequation.com.au": "1PQ_Bm3wkVXYMHPSVhoOb1AoQFQ23JwHS"
+};
+
+let missingList = []; 
+
+function getFormattedDate(dateString) {
+    const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    const d = new Date(dateString);
+    return `${d.getDate()} ${months[d.getMonth()]} ${d.getFullYear()}`;
+}
+
+function saveToLog(newData) {
+    let currentLog = [];
+    if (fs.existsSync(LOG_PATH)) {
+        try { currentLog = JSON.parse(fs.readFileSync(LOG_PATH)); } catch (e) { currentLog = []; }
+    }
+    const index = currentLog.findIndex(item => item.uuid === newData.uuid);
+    if (index !== -1) {
+        currentLog[index] = { ...currentLog[index], ...newData };
+    } else {
+        currentLog.push(newData);
+    }
+    fs.writeFileSync(LOG_PATH, JSON.stringify(currentLog, null, 2));
+}
+
+async function getZoomAccessToken() {
+    if (!fs.existsSync(TOKEN_PATH)) throw new Error("❌ No Token Found!");
+    let tokenData = JSON.parse(fs.readFileSync(TOKEN_PATH));
+    if (Date.now() >= tokenData.expires_at) {
+        console.log('🔄 Refreshing Zoom Token...');
+        const credentials = Buffer.from(`${process.env.ZOOM_CLIENT_ID}:${process.env.ZOOM_CLIENT_SECRET}`).toString('base64');
+        const res = await axios.post('https://zoom.us/oauth/token', querystring.stringify({ grant_type: 'refresh_token', refresh_token: tokenData.refresh_token }), { headers: { 'Authorization': `Basic ${credentials}`, 'Content-Type': 'application/x-www-form-urlencoded' } });
+        tokenData = { access_token: res.data.access_token, refresh_token: res.data.refresh_token, expires_at: Date.now() + (res.data.expires_in * 1000) - 5000 };
+        fs.writeFileSync(TOKEN_PATH, JSON.stringify(tokenData));
+    }
+    return tokenData.access_token;
+}
+
+// 🏷️ RENAME ZOOM
+async function markZoomComplete(meetingId, currentTopic, token) {
+    if (currentTopic.includes('✅')) return; 
+    try {
+        const safeId = encodeURIComponent(meetingId);
+        const newTopic = `${currentTopic} ✅`;
+        await axios.patch(`https://api.zoom.us/v2/meetings/${safeId}`, { topic: newTopic }, { headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' } });
+    } catch (e) {
+        if (e.response && e.response.status === 404) {
+             try {
+                const doubleId = encodeURIComponent(encodeURIComponent(meetingId));
+                await axios.patch(`https://api.zoom.us/v2/meetings/${doubleId}`, { topic: `${currentTopic} ✅` }, { headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' } });
+             } catch(err2) {}
+        }
+    }
+}
+
+// 🔍 SALES DRIVE CHECKER
+async function verifySalesInDrive(topic, dateStr, salesParentId) {
+    const oauth2Client = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, "http://localhost");
+    oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
+    const drive = google.drive({ version: 'v3', auth: oauth2Client });
+
+    try {
+        const safeName = topic.replace(/'/g, "\\'");
+        const safeDate = dateStr.replace(/'/g, "\\'");
+
+        // 1. Find the Folder
+        const folderQuery = `mimeType = 'application/vnd.google-apps.folder' and '${salesParentId}' in parents and name = '${safeName}' and trashed = false`;
+        const folderRes = await drive.files.list({ q: folderQuery, fields: 'files(id, webViewLink)', supportsAllDrives: true, includeItemsFromAllDrives: true });
+        
+        if (!folderRes.data.files || folderRes.data.files.length === 0) return { found: false };
+        const specificFolderId = folderRes.data.files[0].id;
+        const folderLink = folderRes.data.files[0].webViewLink;
+
+        // 2. Look INSIDE that folder for "Topic - Date"
+        const fileQuery = `'${specificFolderId}' in parents and name contains '${safeName}' and name contains '${safeDate}' and trashed = false`;
+        const fileRes = await drive.files.list({ q: fileQuery, fields: 'files(id, webViewLink)', supportsAllDrives: true, includeItemsFromAllDrives: true });
+        
+        if (fileRes.data.files.length > 0) {
+            return { found: true, link: folderLink }; 
+        }
+
+        return { found: false };
+    } catch (e) { return { found: false }; }
+}
+
+async function runSalesCheck() {
+    try {
+        console.log(`🕵️ STARTING SALES-ONLY CHECKER (${START_DATE_STR} - Today)...`);
+        
+        const token = await getZoomAccessToken();
+        const usersRes = await axios.get('https://api.zoom.us/v2/users?page_size=300', { headers: { 'Authorization': `Bearer ${token}` } });
+        const users = usersRes.data.users || [];
+
+        let counter = 0;
+        let foundCount = 0;
+        const startCheckTime = new Date(START_DATE_STR).getTime(); 
+
+        for (const user of users) {
+            // 🛑 ONLY CHECK SALES TEAM
+            if (!SALES_TEAM_FOLDERS[user.email]) continue;
+
+            const salesParentId = SALES_TEAM_FOLDERS[user.email];
+
+            for (let i = 0; i < SCAN_MONTHS_BACK; i++) {
+                let toDate = new Date(); toDate.setMonth(toDate.getMonth() - i);
+                let fromDate = new Date(); fromDate.setMonth(fromDate.getMonth() - (i + 1));
+                const toStr = toDate.toISOString().split('T')[0];
+                const fromStr = fromDate.toISOString().split('T')[0];
+
+                try {
+                    const res = await axios.get(`https://api.zoom.us/v2/users/${user.id}/recordings?from=${fromStr}&to=${toStr}`, { headers: { 'Authorization': `Bearer ${token}` } });
+                    if (!res.data.meetings) continue;
+
+                    for (const meeting of res.data.meetings) {
+                        if (new Date(meeting.start_time).getTime() < startCheckTime) continue;
+                        
+                        counter++;
+                        const niceDate = getFormattedDate(meeting.start_time);
+
+                        // Skip if already marked to save time, OR double check it (optional)
+                        if (meeting.topic.includes('✅')) {
+                             console.log(`${counter}) 🛡️ Already ✅: "${meeting.topic}"`);
+                             continue;
+                        }
+
+                        // 🔍 CHECK DRIVE
+                        const result = await verifySalesInDrive(meeting.topic, niceDate, salesParentId);
+
+                        if (result.found) {
+                            saveToLog({
+                                name: meeting.topic,
+                                uuid: meeting.uuid,
+                                date: niceDate,
+                                zoom_link: meeting.share_url,
+                                drive_link: result.link,
+                                status: "Verified in Drive"
+                            });
+                            await markZoomComplete(meeting.uuid, meeting.topic, token);
+                            
+                            foundCount++;
+                            console.log(`${counter}) ✅ Sales Video Verified: "${meeting.topic}"`);
+                        } else {
+                            missingList.push(`[MISSING] ${meeting.topic} (${niceDate}) | UUID: ${meeting.uuid}`);;
+                            console.log(`${counter}) ❌ Missing/Mismatch: "${meeting.topic}"`);
+                        }
+                    }
+                } catch (e) { /* Ignore */ }
+            }
+        }
+
+        console.log("\n🏁 SALES CHECK COMPLETE");
+        console.log(`   🔢 Scanned: ${counter}`);
+        console.log(`   ✅ Verified: ${foundCount}`);
+        console.log(`   ❌ Missing: ${missingList.length}`);
+        
+        fs.writeFileSync(REPORT_PATH, missingList.join('\n'));
+
+    } catch (error) { console.error("❌ Error:", error.message); }
+}
+
+runSalesCheck();
+</pre></code>
 </body>
 </html>
+
+<style>
+.h1{
+    font-size: large;
+    font-style: italic;
+}
+
+.code{
+    font-style: normal;
+}
+</style>
