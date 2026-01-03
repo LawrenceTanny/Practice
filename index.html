@@ -30,7 +30,7 @@ const querystring = require('querystring');
 // --- 🛡️ CONFIGURATION ---
 const CHECK_INTERVAL_MINUTES = 20; 
 const SCAN_MONTHS_BACK = 6; 
-const START_DATE_STR = "2025-10-22"; // 📅 STRICT START DATE
+const START_DATE_STR = "2025-10-22"; 
 const TOKEN_PATH = path.join(__dirname, 'zoom_token.json');
 const LOG_PATH = path.join(__dirname, 'completed_log.json');
 const CLICKUP_LAST_1_1_ID = "a1461481-3edc-4c68-b542-3f24b2386dec";
@@ -84,10 +84,18 @@ async function sendEmailNotification(status, videoName, brand, details) {
     oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
     const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
     
-    const subject = status === 'SUCCESS' ? `✅ Upload Success: ${videoName}` : `❌ Upload Failed: ${videoName}`;
-    const text = status === 'SUCCESS' ? 
-        `Video: ${videoName}\nBrand: ${brand}\n\n-- LINKS --\n${details}` : 
-        `Video: ${videoName}\nBrand: ${brand}\n\nFailed to upload.\nReason: ${details}`;
+    let subject, text;
+
+    if (status === 'SUCCESS') {
+        subject = `✅ Upload Success: ${videoName}`;
+        text = `Video: ${videoName}\nBrand: ${brand}\n\n-- LINKS --\n${details}`;
+    } else if (status === 'FAIL') {
+        subject = `❌ Upload Failed: ${videoName}`;
+        text = `Video: ${videoName}\nBrand: ${brand}\n\nFailed to find brand in ClickUp.\nReason: ${details}`;
+    } else if (status === 'MISSING') {
+        subject = `⚠️ ACTION REQUIRED: Missing Files for ${videoName}`;
+        text = `Video: ${videoName}\nBrand: ${brand}\n\nThe bot successfully processed some files, but others failed to upload.\n\nMISSING FILES:\n${details}\n\nPlease verify manually.`;
+    }
     
     const utf8Subject = `=?utf-8?B?${Buffer.from(subject).toString('base64')}?=`;
     const messageParts = [`From: <${process.env.EMAIL_USER}>`, `To: <${process.env.EMAIL_USER}>`, `Subject: ${utf8Subject}`, `MIME-Version: 1.0`, `Content-Type: text/plain; charset=utf-8`, `Content-Transfer-Encoding: 7bit`, ``, text];
@@ -110,7 +118,6 @@ async function getZoomAccessToken() {
     return tokenData.access_token;
 }
 
-// 💾 HELPER: Safe Save to JSON
 function saveToLog(newData) {
     let currentLog = [];
     if (fs.existsSync(LOG_PATH)) {
@@ -130,19 +137,8 @@ async function markZoomComplete(meetingId, currentTopic, token) {
     try {
         const safeId = encodeURIComponent(meetingId);
         const newTopic = `${currentTopic} ✅`;
-        await axios.patch(`https://api.zoom.us/v2/meetings/${safeId}`, 
-            { topic: newTopic },
-            { headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' } }
-        );
-        console.log(`      ✨ Marked Zoom Meeting as Complete (Added ✅)`);
-    } catch (e) {
-        if (e.response && e.response.status === 404) {
-             try {
-                const doubleId = encodeURIComponent(encodeURIComponent(meetingId));
-                await axios.patch(`https://api.zoom.us/v2/meetings/${doubleId}`, { topic: `${currentTopic} ✅` }, { headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' } });
-             } catch(err2) {}
-        }
-    }
+        await axios.patch(`https://api.zoom.us/v2/meetings/${safeId}`, { topic: newTopic }, { headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' } });
+    } catch (e) { /* Ignore 404 */ }
 }
 
 async function deleteZoomRecording(meetingId, token) {
@@ -150,12 +146,8 @@ async function deleteZoomRecording(meetingId, token) {
         console.log(`      🗑️ Deleting Recording from Zoom (UUID: ${meetingId})...`);
         const safeId = encodeURIComponent(meetingId);
         await axios.delete(`https://api.zoom.us/v2/meetings/${safeId}/recordings`, { headers: { 'Authorization': `Bearer ${token}` } });
-        console.log(`      ✅ Deleted from Zoom Cloud.`);
         return true;
-    } catch (e) { 
-        console.error(`      ⚠️ Failed to delete from Zoom: ${e.message}`); 
-        return false;
-    }
+    } catch (e) { return false; }
 }
 
 async function refreshClickUpCache() {
@@ -165,7 +157,7 @@ async function refreshClickUpCache() {
         FIELD_MAP.internal = res.data.fields.find(f => f.name === process.env.CLICKUP_INTERNAL_COL_NAME)?.id;
         FIELD_MAP.member = res.data.fields.find(f => f.name === process.env.CLICKUP_MEMBER_COL_NAME)?.id;
     }
-    console.log("   📥 Downloading ClickUp Database (Lite Mode)");
+    console.log("   📥 Downloading ClickUp Database...");
     let allLiteTasks = [], page = 0, keepGoing = true;
     while (keepGoing) {
         try {
@@ -178,26 +170,19 @@ async function refreshClickUpCache() {
             }
         } catch (e) { keepGoing = false; }
     }
-    console.log(`\n   ✅ ClickUp Cache Updated: ${allLiteTasks.length} Brands loaded. `);
     CLICKUP_CACHE = allLiteTasks;
 }
 
 function findFolderLinksInMemory(brandName) {
     const task = CLICKUP_CACHE.find(t => t.n === brandName.trim().toLowerCase());
     if (!task) return null;
-
     const extractId = (link) => {
         if (!link) return null;
         let id = link;
-        if (link.includes('id=')) {
-            id = link.split('id=')[1];
-        } else {
-            const parts = link.split('/');
-            id = parts[parts.length - 1] || parts[parts.length - 2];
-        }
+        if (link.includes('id=')) id = link.split('id=')[1];
+        else { const parts = link.split('/'); id = parts[parts.length - 1] || parts[parts.length - 2]; }
         return id.split('?')[0].trim();
     };
-
     return { taskId: task.id, internalFolderId: extractId(task.i), memberFolderId: extractId(task.m) };
 }
 
@@ -206,21 +191,14 @@ async function updateClickUpSmart(taskId, newDateUnix) {
     try {
         const res = await axios.get(`https://api.clickup.com/api/v2/task/${taskId}`, { headers: { 'Authorization': process.env.CLICKUP_API_KEY } });
         const customFields = res.data.custom_fields || [];
-
         const checkAndUpdate = async (fieldId, fieldName) => {
             const field = customFields.find(f => f.id === fieldId);
             let currentDate = 0;
             if (field && field.value) currentDate = parseInt(field.value); 
-
-            if (newDateUnix > currentDate) {
-                console.log(`      📅 Updating '${fieldName}'...`);
-                await axios.post(`https://api.clickup.com/api/v2/task/${taskId}/field/${fieldId}`, { value: newDateUnix }, { headers: { 'Authorization': process.env.CLICKUP_API_KEY, 'Content-Type': 'application/json' } });
-            }
+            if (newDateUnix > currentDate) await axios.post(`https://api.clickup.com/api/v2/task/${taskId}/field/${fieldId}`, { value: newDateUnix }, { headers: { 'Authorization': process.env.CLICKUP_API_KEY, 'Content-Type': 'application/json' } });
         };
-
         if (CLICKUP_LAST_1_1_ID) await checkAndUpdate(CLICKUP_LAST_1_1_ID, "Last 1:1");
         if (CLICKUP_CHECKIN_ID) await checkAndUpdate(CLICKUP_CHECKIN_ID, "Check In");
-
     } catch (e) { console.error(`      ⚠️ Failed to Smart Update ClickUp: ${e.message}`); }
 }
 
@@ -229,29 +207,19 @@ async function createDriveFolder(folderName, parentId) {
     oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
     const drive = google.drive({ version: 'v3', auth: oauth2Client });
     const safeName = folderName.replace(/[:\/]/g, ' '); 
-    
-    // Check if folder exists first
     const q = `mimeType = 'application/vnd.google-apps.folder' and '${parentId}' in parents and name = '${safeName}' and trashed = false`;
     const checkRes = await drive.files.list({ q, fields: 'files(id)', supportsAllDrives: true, includeItemsFromAllDrives: true });
-    
-    if (checkRes.data.files && checkRes.data.files.length > 0) {
-        return checkRes.data.files[0].id; // Return existing ID
-    }
-
+    if (checkRes.data.files && checkRes.data.files.length > 0) return checkRes.data.files[0].id; 
     const res = await drive.files.create({ resource: { name: safeName, mimeType: 'application/vnd.google-apps.folder', parents: [parentId] }, fields: 'id, webViewLink', supportsAllDrives: true });
     return res.data.id;
 }
 
-// 🛡️ NEW FUNCTION: CHECK IF FILE ALREADY IN DRIVE
 async function checkFileExistsInDrive(fileName, folderId) {
     const oauth2Client = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, "http://localhost");
     oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
     const drive = google.drive({ version: 'v3', auth: oauth2Client });
-    
-    // Exact name match + Correct Parent Folder + Not Trashed
     const safeName = fileName.replace(/'/g, "\\'"); 
     const q = `'${folderId}' in parents and name = '${safeName}' and trashed = false`;
-    
     try {
         const res = await drive.files.list({ q, fields: 'files(id)', supportsAllDrives: true, includeItemsFromAllDrives: true });
         return (res.data.files && res.data.files.length > 0);
@@ -262,14 +230,8 @@ async function uploadToDrive(filePath, fileName, folderId) {
     const oauth2Client = new google.auth.OAuth2(process.env.GOOGLE_CLIENT_ID, process.env.GOOGLE_CLIENT_SECRET, "http://localhost");
     oauth2Client.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
     const drive = google.drive({ version: 'v3', auth: oauth2Client });
-
-    if (!fs.existsSync(filePath)) throw new Error(`FILE MISSING on Disk: ${filePath}`);
-
-    const res = await drive.files.create({ 
-        resource: { name: fileName, parents: [folderId] }, 
-        media: { mimeType: 'video/mp4', body: fs.createReadStream(filePath) }, 
-        fields: 'id, webViewLink', supportsAllDrives: true 
-    });
+    if (!fs.existsSync(filePath)) throw new Error(`CRITICAL: File was not found at ${filePath}.`);
+    const res = await drive.files.create({ resource: { name: fileName, parents: [folderId] }, media: { mimeType: 'video/mp4', body: fs.createReadStream(filePath) }, fields: 'id, webViewLink', supportsAllDrives: true });
     return res.data;
 }
 
@@ -279,9 +241,7 @@ async function checkZoom() {
         console.log(`\n🕒 Watchman Scan: ${new Date().toLocaleTimeString()}`);
         const token = await getZoomAccessToken();
         let completed = [];
-        if (fs.existsSync(LOG_PATH)) {
-            try { completed = JSON.parse(fs.readFileSync(LOG_PATH)); } catch (e) { completed = []; }
-        }
+        if (fs.existsSync(LOG_PATH)) try { completed = JSON.parse(fs.readFileSync(LOG_PATH)); } catch (e) { completed = []; }
 
         const usersRes = await axios.get('https://api.zoom.us/v2/users?page_size=300', { headers: { 'Authorization': `Bearer ${token}` } });
         const users = usersRes.data.users || [];
@@ -304,7 +264,6 @@ async function checkZoom() {
                         try {
                             if (new Date(meeting.start_time).getTime() < startCheckTime) continue;
                             if (completed.some(item => item.uuid === meeting.uuid)) continue;
-                            
                             if (meeting.topic.includes('✅')) {
                                  saveToLog({ name: meeting.topic, uuid: meeting.uuid, date: getFormattedDate(meeting.start_time), status: "Already Marked ✅ (Auto-Skipped)" });
                                  continue;
@@ -316,11 +275,9 @@ async function checkZoom() {
                             let shouldSkipForever = false;
                             let emailLinksDetail = ""; 
 
-                            // 1. SALES LOGIC
                             if (SALES_TEAM_FOLDERS[user.email]) {
                                 if (!meeting.topic.includes(' x ') || !meeting.topic.includes('EE Scale Session')) {
                                     shouldSkipForever = true; 
-                                    console.log(`      ⚠️ Sales Video Skipped (Wrong Format): "${meeting.topic}"`);
                                 } else {
                                     console.log(`   🚀 Found Sales Video: "${meeting.topic}" (${fromStr})`);
                                     const parentId = SALES_TEAM_FOLDERS[user.email];
@@ -329,35 +286,21 @@ async function checkZoom() {
                                         links = { internalFolderId: subFolderId, memberFolderId: subFolderId };
                                         isSalesEquation = true;
                                         brand = "Sales Equation";
-                                        emailLinksDetail = `📂 Created Folder: https://drive.google.com/drive/folders/${subFolderId}`;
-                                    } catch (e) {
-                                        console.error(`      ❌ Failed to create/find sales folder: ${e.message}`);
-                                        continue; 
-                                    }
+                                        emailLinksDetail = `📂 Folder: https://drive.google.com/drive/folders/${subFolderId}`;
+                                    } catch (e) { continue; }
                                 }
-                            } 
-                            // 2. STANDARD LOGIC
-                            else {
-                                if (IGNORE_TOPICS.some(ignored => meeting.topic.includes(ignored))) {
-                                    shouldSkipForever = true;
-                                } 
-                                else if (meeting.topic.includes("1:1")) {
-                                    shouldSkipForever = true;
-                                    console.log(`      ⚠️ Standard Video Skipped (Contains 1:1): "${meeting.topic}"`);
-                                }
+                            } else {
+                                if (IGNORE_TOPICS.some(ignored => meeting.topic.includes(ignored))) shouldSkipForever = true;
+                                else if (meeting.topic.includes("1:1")) shouldSkipForever = true;
                                 else {
                                     const nameParts = meeting.topic.split(' x ');
-                                    if (nameParts.length < 2) {
-                                        shouldSkipForever = true; 
-                                    } else {
+                                    if (nameParts.length < 2) shouldSkipForever = true; 
+                                    else {
                                         brand = nameParts[1].split('-')[0].trim();
                                         if (nameParts[1].includes("Scale Session")) brand = nameParts[0].trim();
                                         console.log(`   🚀 Found Standard Video: "${meeting.topic}" (${fromStr})`);
                                         links = findFolderLinksInMemory(brand);
-                                        
-                                        if (links) {
-                                            emailLinksDetail = `📂 Member Content: https://drive.google.com/drive/folders/${links.memberFolderId}\n📂 Internal Folder: https://drive.google.com/drive/folders/${links.internalFolderId}`;
-                                        }
+                                        if (links) emailLinksDetail = `📂 Member: https://drive.google.com/drive/folders/${links.memberFolderId}\n📂 Internal: https://drive.google.com/drive/folders/${links.internalFolderId}`;
                                     }
                                 }
                             }
@@ -371,20 +314,15 @@ async function checkZoom() {
                             }
 
                             console.log(`      ✅ Destination Found! Processing files...`);
-
-                            let allFilesSuccess = true;
                             const niceDate = getFormattedDate(meeting.start_time);
-                            let updatedClickUp = false;
+                            let processedFiles = []; // Track all files to check later
 
-                            // 📂 FILE UPLOAD LOOP
+                            // --- PHASE 1: ATTEMPT DOWNLOAD & UPLOAD ---
                             for (const file of meeting.recording_files) {
-                                if (file.file_extension && file.file_extension.toLowerCase() === 'json') continue;
-                                if (file.file_type === 'TIMELINE') continue;
-                                
-                                const isTextFile = (file.file_extension && file.file_extension.toUpperCase() === 'TXT') || file.file_type === 'CHAT';
-                                if (!isTextFile && file.file_size && file.file_size < 1024) continue; 
+                                if (file.file_extension === 'JSON' || file.file_type === 'TIMELINE') continue;
+                                const isTextFile = (file.file_extension === 'TXT') || file.file_type === 'CHAT';
+                                if (!isTextFile && file.file_size < 1024) continue; 
 
-                                // 🛡️ AGGRESSIVE SANITIZATION & UNIQUE NAMING 🛡️
                                 let fileExt = `.${file.file_extension.toLowerCase()}`;
                                 if (file.file_type === 'MP4') fileExt = '.mp4';
                                 else if (file.file_type === 'M4A') fileExt = '.m4a';
@@ -392,74 +330,108 @@ async function checkZoom() {
 
                                 const safeTopic = meeting.topic.replace(/[^a-zA-Z0-9 \-\.]/g, '').trim();
                                 const safeDate = niceDate.replace(/[^a-zA-Z0-9 \-\.]/g, '');
-                                const shortId = file.id ? `-${file.id.substring(0,4)}` : ''; 
-
-                                let finalFileName = `${safeTopic} - ${safeDate}${shortId}${fileExt}`;
+                                let finalFileName = `${safeTopic} - ${safeDate}${fileExt}`;
                                 const tempPath = path.join(__dirname, finalFileName);
 
-                                // 🔍 DESTINATION TARGET
                                 let targetFolder = links.internalFolderId;
                                 if (!isSalesEquation) {
                                     if (file.file_type === 'MP4') targetFolder = links.memberFolderId;
                                     else targetFolder = links.internalFolderId; 
                                     if (user.email === 'travis@ecommerceequation.com.au') targetFolder = links.internalFolderId;
-                                } else {
-                                    targetFolder = links.internalFolderId; 
                                 }
 
-                                // 🟢 1. RE-CHECK: DOES IT EXIST IN DRIVE ALREADY? (The "Resume" Fix)
-                                const alreadyExists = await checkFileExistsInDrive(finalFileName, targetFolder);
-                                if (alreadyExists) {
-                                    console.log(`      ⏩ File exists in Drive. Skipping upload: "${finalFileName}"`);
-                                    continue; // Skip to next file, but count this as success!
+                                // Add to list for final verification
+                                processedFiles.push({ 
+                                    name: finalFileName, 
+                                    path: tempPath, 
+                                    targetFolder: targetFolder, 
+                                    url: file.download_url,
+                                    type: file.file_type 
+                                });
+
+                                // Smart Resume: Skip if exists
+                                if (await checkFileExistsInDrive(finalFileName, targetFolder)) {
+                                    console.log(`      ⏩ Exists in Drive: "${finalFileName}"`);
+                                    continue;
                                 }
 
-                                // 🟢 2. CLEANUP LOCAL: Remove stale file if exists
-                                if (fs.existsSync(tempPath)) {
-                                    console.log(`      🧹 Removing stale local file: ${finalFileName}`);
-                                    fs.unlinkSync(tempPath);
-                                }
+                                // Delete stale local file if it exists
+                                if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
 
                                 try {
                                     const writer = fs.createWriteStream(tempPath);
                                     const streamRes = await axios({ url: `${file.download_url}?access_token=${token}`, method: 'GET', responseType: 'stream' });
                                     streamRes.data.pipe(writer);
                                     await new Promise((resolve, reject) => { writer.on('finish', resolve); writer.on('error', reject); });
-
+                                    
                                     console.log(`      📤 Uploading "${finalFileName}"...`);
                                     await uploadToDrive(tempPath, finalFileName, targetFolder);
+                                } catch (err) { console.error(`      ⚠️ Initial Upload Failed: ${err.message}`); }
+                            }
+
+                            // --- PHASE 2: VERIFICATION & REPAIR ---
+                            console.log("      🔍 Verifying all files in Drive...");
+                            let missingFiles = [];
+
+                            for (const pFile of processedFiles) {
+                                const exists = await checkFileExistsInDrive(pFile.name, pFile.targetFolder);
+                                
+                                if (!exists) {
+                                    console.log(`      ⚠️ File MISSING in Drive: ${pFile.name}. Checking local disk...`);
                                     
-                                    if (file.file_type === 'MP4') {
-                                            await sendEmailNotification('SUCCESS', finalFileName, brand, emailLinksDetail);
-                                            if (!isSalesEquation && links.taskId && !updatedClickUp) {
-                                                await updateClickUpSmart(links.taskId, new Date(meeting.start_time).getTime());
-                                                updatedClickUp = true;
+                                    // REPAIR ATTEMPT: Check local disk
+                                    if (fs.existsSync(pFile.path)) {
+                                        try {
+                                            console.log(`      🔄 Retrying Upload from local disk...`);
+                                            await uploadToDrive(pFile.path, pFile.name, pFile.targetFolder);
+                                            // Re-check
+                                            if (await checkFileExistsInDrive(pFile.name, pFile.targetFolder)) {
+                                                console.log(`      ✅ Retry Success!`);
+                                                continue; // It's fixed, move to next file
                                             }
+                                        } catch (e) { }
                                     }
-                                } catch (err) {
-                                    console.error(`      ❌ Error Uploading File: ${err.message}`);
-                                    allFilesSuccess = false;
-                                } finally {
-                                    if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath); 
+                                    
+                                    // If we reach here, it's still missing
+                                    missingFiles.push(pFile.name);
                                 }
                             }
 
-                            if (allFilesSuccess) {
+                            // --- PHASE 3: FINAL VERDICT & CLEANUP ---
+                            if (missingFiles.length === 0) {
+                                // 🎉 SUCCESS SCENARIO
+                                console.log("      ✅ All files verified. Cleaning up.");
+                                processedFiles.forEach(f => { if(fs.existsSync(f.path)) fs.unlinkSync(f.path); }); // Delete local
+                                
                                 if (!isSalesEquation) {
-                                    console.log(`      🗑️ Deleting Standard Recording from Zoom...`);
                                     const deleted = await deleteZoomRecording(meeting.uuid, token);
                                     if (!deleted) await markZoomComplete(meeting.uuid, meeting.topic, token);
                                 } else {
-                                    console.log(`      🛡️ Keeping Sales Recording on Zoom.`);
                                     await markZoomComplete(meeting.uuid, meeting.topic, token);
                                 }
+                                
+                                await sendEmailNotification('SUCCESS', meeting.topic, brand, emailLinksDetail);
                                 saveToLog({ name: meeting.topic, uuid: meeting.uuid, date: niceDate, link: meeting.share_url, status: "Uploaded & Completed" });
+                                
+                                if (!isSalesEquation && links.taskId) await updateClickUpSmart(links.taskId, new Date(meeting.start_time).getTime());
+
                             } else {
-                                console.log("      ⚠️ Upload had errors. Zoom file NOT deleted. Will retry.");
+                                // ⚠️ FAILURE SCENARIO (HANDOVER PROTOCOL)
+                                console.log("      ❌ Verification Failed. Missing files: " + missingFiles.join(", "));
+                                
+                                // Delete local files anyway to keep server clean
+                                processedFiles.forEach(f => { if(fs.existsSync(f.path)) fs.unlinkSync(f.path); }); 
+
+                                // Send Action Required Email
+                                const missingDetails = missingFiles.join("\n") + "\n\nTarget Folder: " + emailLinksDetail;
+                                await sendEmailNotification('MISSING', meeting.topic, brand, missingDetails);
+
+                                // LOG AS "MANUAL CHECK REQUIRED" (Prevents Loop)
+                                console.log("      🛑 Logged as 'Manual Check Required' to prevent infinite loop.");
+                                saveToLog({ name: meeting.topic, uuid: meeting.uuid, date: niceDate, link: meeting.share_url, status: "Manual Check Required - Email Sent" });
                             }
-                        } catch (meetingErr) {
-                            console.error(`      🔥 CRITICAL ERROR PROCESSING MEETING "${meeting.topic}":`, meetingErr.message);
-                        }
+
+                        } catch (meetingErr) { console.error(`      🔥 CRITICAL ERROR:`, meetingErr.message); }
                     }
                 } catch (err) {}
             }
