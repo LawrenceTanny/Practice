@@ -25,16 +25,27 @@
         </a>
     </p>
 
-    <h1>Wala padin ako laptop</h1>
-    <h1>Updated na</h1>
+    <h1>Ganda salamin ko</h1>
+    <h1>Updated na talaga</h1>
     <h1><strong>server.js</strong></h1>
     <code><pre>
-       require('dotenv').config();
+console.time("Startup"); 
+console.log("DEBUG: 1. Script starting...");
+
+require('dotenv').config();
+console.log("DEBUG: 2. Dotenv loaded. Loading Axios...");
+
 const axios = require('axios');
+console.log("DEBUG: 3. Axios loaded. Loading Google APIs (This is the heavy one)...");
+
+const { google } = require('googleapis');
+console.log("DEBUG: 4. Google APIs loaded!");
+console.timeLog("Startup"); 
+
 const fs = require('fs');
 const path = require('path');
-const { google } = require('googleapis');
 const querystring = require('querystring');
+console.log("DEBUG: 5. All libraries loaded. Moving to main code...");
 
 const CHECK_INTERVAL_MINUTES = 20; 
 const SCAN_MONTHS_BACK = 6; 
@@ -449,7 +460,7 @@ async function checkZoom() {
         await new Promise(resolve => setTimeout(resolve, CHECK_INTERVAL_MINUTES * 60 * 1000));
     }
 })();
-</pre></code>
+    </pre></code>
 </body>
 
 </html>
